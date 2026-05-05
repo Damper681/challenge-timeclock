@@ -259,6 +259,7 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
     return onSnapshot(q, snap=>{
       console.log('[Commandes] snapshot reçu, docs:', snap.docs.length)
       const all = snap.docs.map(d=>({id:d.id,...d.data()}))
+      console.log('[Commandes] sample doc:', JSON.stringify(all.find(o=>o.client==='Cattin')))
       const matched = all.filter(o=>{
         // Skip archived
         if (o.archived === true) return false
