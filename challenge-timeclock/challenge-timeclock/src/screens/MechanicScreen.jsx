@@ -276,7 +276,7 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
       setCommandes(matched)
       setCommandesLoading(false)
     })
-  },[or.client])
+  },[or.client, or.noFT])
 
   useEffect(()=>{
     const q = query(collection(db,'photos'), where('orId','==',or.id))
