@@ -253,6 +253,7 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
     if (!or.client) { setCommandesLoading(false); return }
     const clientLower = or.client.toLowerCase().trim()
     const noFT = or.noFT
+    console.log('[Commandes] OR noFT:', noFT, 'client:', or.client)
     // Load all non-archived orders and filter in JS
     const q = query(collection(dbCommandes,'orders'))
     return onSnapshot(q, snap=>{
