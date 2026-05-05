@@ -1,0 +1,788 @@
+import { useState, useEffect, useRef } from 'react'
+import {
+  collection, onSnapshot, doc, addDoc, updateDoc,
+  query, where, serverTimestamp, getDocs, orderBy
+} from 'firebase/firestore'
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
+import { db, storage } from '../firebase.js'
+import { dbCommandes } from '../firebaseCommandes.js'
+
+const USER_COLORS = { jose:'#4fc3f7', vivian:'#6ee7a0', valentin:'#ffb74d' }
+
+function fmtDuration(s) {
+  const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60
+  return h>0 ? `${h}h${String(m).padStart(2,'0')}` : `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+}
+function fmtMin(min) {
+  if (!min) return null
+  const h=Math.floor(min/60), m=min%60
+  return h>0 ? `${h}h${String(m).padStart(2,'0')}` : `${m}min`
+}
+function fmtTime(ts) {
+  if (!ts) return ''
+  const d = ts?.toDate ? ts.toDate() : new Date(ts)
+  return d.toLocaleTimeString('fr-CH',{hour:'2-digit',minute:'2-digit'})
+}
+function fmtDate(ts) {
+  if (!ts) return ''
+  const d = ts?.toDate ? ts.toDate() : new Date(ts)
+  return d.toLocaleDateString('fr-CH',{day:'numeric',month:'short'})
+}
+function today() { return new Date().toISOString().split('T')[0] }
+
+function useSpeech(onResult) {
+  const recRef = useRef(null)
+  const [listening, setListening] = useState(false)
+  const start = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) { alert("Reconnaissance vocale non disponible"); return }
+    const rec = new SR()
+    rec.lang='fr-FR'; rec.continuous=false; rec.interimResults=false
+    rec.onresult = e => onResult(Array.from(e.results).map(r=>r[0].transcript).join(' '))
+    rec.onend = () => setListening(false)
+    rec.onerror = () => setListening(false)
+    rec.start(); recRef.current=rec; setListening(true)
+  }
+  const stop = () => { recRef.current?.stop(); setListening(false) }
+  return { listening, start, stop }
+}
+
+// ─── NOTE OVERLAY ─────────────────────────────────────────────────────────────
+function NoteOverlay({ color, title, subtitle, onConfirm }) {
+  const [text, setText] = useState('')
+  const speech = useSpeech(t => setText(prev => prev ? prev+' '+t : t))
+  return (
+    <div style={s.overlay}>
+      <div style={s.noteBox}>
+        <p style={s.noteTitle}>{title}</p>
+        {subtitle && <p style={s.noteSub}>{subtitle}</p>}
+        <textarea style={s.noteTA}
+          placeholder="Ex : filtre changé, plaquettes avant refaites, anomalie constatée..."
+          value={text} onChange={e=>setText(e.target.value)} autoFocus rows={5}/>
+        <button style={{...s.voiceBtn,
+          background: speech.listening ? color+'30':'rgba(255,255,255,0.07)',
+          borderColor: speech.listening ? color:'rgba(255,255,255,0.12)',
+          color: speech.listening ? color:'#ccc'
+        }} onClick={speech.listening ? speech.stop : speech.start}>
+          {speech.listening ? '⏹  Arrêter l\'écoute' : '🎤  Dicter à voix haute'}
+        </button>
+        {speech.listening && <p style={{...s.listenLabel, color}}>● Écoute en cours...</p>}
+        <div style={s.noteActions}>
+          <button style={s.skipBtn} onClick={()=>onConfirm('')}>Passer</button>
+          <button style={{...s.okBtn, background:color, color:'#000'}} onClick={()=>onConfirm(text)}>✓  Valider</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── WAITING OVERLAY — motif de mise en attente ───────────────────────────────
+function WaitingOverlay({ color, or, onConfirm, onCancel }) {
+  const [motif, setMotif] = useState('')
+  const MOTIFS = ['En attente de pièces','Expertise en cours','Client injoignable','Accord assurance attendu','Restauration','Autre']
+  return (
+    <div style={s.overlay}>
+      <div style={s.noteBox}>
+        <p style={s.noteTitle}>Mettre en attente</p>
+        <p style={s.noteSub}>OR {or.noFT} · {or.client}</p>
+        <div style={s.motifGrid}>
+          {MOTIFS.map(m=>(
+            <button key={m} style={{
+              ...s.motifBtn,
+              background: motif===m ? color+'20' : 'rgba(255,255,255,0.04)',
+              borderColor: motif===m ? color : '#2a2a2a',
+              color: motif===m ? color : '#aaa',
+            }} onClick={()=>setMotif(m)}>{m}</button>
+          ))}
+        </div>
+        <div style={s.noteActions}>
+          <button style={s.skipBtn} onClick={onCancel}>Annuler</button>
+          <button style={{...s.okBtn, background:color, color:'#000'}} onClick={()=>onConfirm(motif)}>
+            Mettre en attente
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── PHOTO UPLOADER ───────────────────────────────────────────────────────────
+function PhotoUploader({ or, color, onClose }) {
+  const [uploading, setUploading] = useState(false)
+  const [uploaded, setUploaded] = useState([])
+  const [error, setError] = useState('')
+  const inputRef = useRef(null)
+
+  const handleFiles = async (e) => {
+    const files = Array.from(e.target.files)
+    if (!files.length) return
+    setUploading(true); setError('')
+    try {
+      const results = []
+      for (const file of files) {
+        const compressed = await compressImage(file, 1600, 0.82)
+        const filename = `${today()}/${or.noFT}_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g,'_')}`
+        const storageRef = ref(storage, `photos/${filename}`)
+        await uploadBytes(storageRef, compressed)
+        const url = await getDownloadURL(storageRef)
+        results.push({ url, filename, name: file.name })
+      }
+      await addDoc(collection(db,'photos'), {
+        orId: or.id, noFT: or.noFT, client: or.client,
+        vehicule: or.vehicule, dateKey: today(),
+        photos: results, uploadedAt: serverTimestamp(),
+      })
+      setUploaded(results)
+    } catch(err) { setError('Erreur : ' + err.message) }
+    setUploading(false)
+  }
+
+  return (
+    <div style={s.overlay}>
+      <div style={s.photoBox}>
+        <p style={s.noteTitle}>📷 Ajouter des photos</p>
+        <p style={s.noteSub}>OR {or.noFT} · {or.client}</p>
+        {uploaded.length===0 ? (
+          <>
+            <div style={s.photoDropZone} onClick={()=>!uploading && inputRef.current?.click()}>
+              {uploading
+                ? <div style={s.uploadingState}><div style={{...s.spinner, borderTopColor:color}}/><span style={{color:'#aaa',fontSize:16}}>Upload...</span></div>
+                : <><div style={s.photoIcon}>📷</div><div style={s.photoDropLabel}>Prendre une photo</div><div style={s.photoDropSub}>ou sélectionner depuis la galerie</div></>
+              }
+            </div>
+            <input ref={inputRef} type="file" accept="image/*" multiple capture="environment" onChange={handleFiles} style={{display:'none'}}/>
+            {error && <p style={s.errorMsg}>{error}</p>}
+          </>
+        ) : (
+          <div style={s.uploadedList}>
+            <div style={s.successIcon}>✓</div>
+            <p style={s.successText}>{uploaded.length} photo{uploaded.length>1?'s':''} ajoutée{uploaded.length>1?'s':''}</p>
+            <div style={s.thumbGrid}>{uploaded.map((p,i)=><img key={i} src={p.url} alt="" style={s.thumb}/>)}</div>
+            <button style={{...s.addMoreBtn, borderColor:color+'44', color}} onClick={()=>{ setUploaded([]); setTimeout(()=>inputRef.current?.click(),100) }}>+ Ajouter d'autres</button>
+          </div>
+        )}
+        <button style={s.skipBtn} onClick={onClose}>Fermer</button>
+      </div>
+    </div>
+  )
+}
+
+async function compressImage(file, maxPx, quality) {
+  return new Promise(resolve=>{
+    const img=new Image(), url=URL.createObjectURL(file)
+    img.onload=()=>{
+      let w=img.width, h=img.height
+      if(w>maxPx||h>maxPx){ if(w>h){h=Math.round(h*maxPx/w);w=maxPx}else{w=Math.round(w*maxPx/h);h=maxPx} }
+      const c=document.createElement('canvas'); c.width=w; c.height=h
+      c.getContext('2d').drawImage(img,0,0,w,h)
+      c.toBlob(blob=>{URL.revokeObjectURL(url);resolve(blob)},'image/jpeg',quality)
+    }
+    img.src=url
+  })
+}
+
+// ─── OR CARD (shared) ─────────────────────────────────────────────────────────
+function ORCard({ or, user, activeOR, elapsed, orTotals, onSelect }) {
+  const color = USER_COLORS[user.id] || '#e8c547'
+  const isMine = activeOR?.orId===or.id
+  const others = (or.activeMechanics||[]).filter(m=>m!==user.id)
+  const totalDisplay = fmtMin((orTotals[or.id]||0)+(isMine?Math.floor(elapsed/60):0))
+  const isWaiting = or.status==='waiting'
+
+  return (
+    <button style={{
+      ...s.card,
+      borderColor: isMine?color:isWaiting?'#555':or.retired?'#e84747':others.length>0?'#555':'#222',
+      background: isMine?color+'12':isWaiting?'rgba(255,255,255,0.03)':or.retired?'rgba(232,71,71,0.05)':'#111',
+      opacity: isWaiting && !isMine ? 0.85 : 1,
+    }} onClick={()=>onSelect(or)}>
+      {isMine && <div style={{...s.cardActiveLine, background:color}}/>}
+      {isWaiting && !isMine && <div style={{...s.cardActiveLine, background:'#555'}}/>}
+      <div style={s.cardInner}>
+        <div style={s.cardRow1}>
+          <span style={s.orLabel}>
+            {or.sansFT ? <span style={{color:'#e84747'}}>Sans FT ⚠</span> : `OR ${or.noFT}`}
+          </span>
+          <div style={s.cardBadges}>
+            {isMine && <span style={{...s.activeBadge, background:color, color:'#000'}}>{fmtDuration(elapsed)}</span>}
+            {others.length>0&&!isMine && <span style={s.otherBadge}>{others.map(m=>m[0].toUpperCase()).join('')} en cours</span>}
+            {totalDisplay && <span style={{...s.timeBadge, color:isMine?color:'#aaa'}}>{totalDisplay}</span>}
+          </div>
+        </div>
+        <div style={s.clientName}>{or.client}</div>
+        <div style={s.vehicleRow}>
+          <span style={s.vehicleText}>{or.vehicule}</span>
+          {or.plaques && <span style={s.platesText}>{or.plaques}</span>}
+        </div>
+        {or.travaux && <div style={s.travauxBox}>{or.travaux.slice(0,110)}{or.travaux.length>110?'…':''}</div>}
+        {isWaiting && or.waitingMotif && <div style={s.waitingTag}>⏸ {or.waitingMotif}</div>}
+        {or.retired && <div style={s.retiredTag}>⚠ Retiré du planning</div>}
+        {isWaiting && or.waitingSince && <div style={s.waitingSince}>Depuis le {fmtDate(or.waitingSince)}</div>}
+        <div style={{...s.openHint, color:isMine?color:isWaiting?'#666':or.retired?'#e84747':'#777'}}>
+          {isMine?'● Chrono en cours — ouvrir →':'Ouvrir le dossier →'}
+        </div>
+      </div>
+    </button>
+  )
+}
+
+// ─── DETAIL ───────────────────────────────────────────────────────────────────
+function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
+  const color = USER_COLORS[user.id] || '#e8c547'
+  const isMine = activeOR?.orId===or.id
+  const isWaiting = or.status==='waiting'
+  const [orPointages, setOrPointages] = useState([])
+  const [orPhotos, setOrPhotos] = useState([])
+  const [km, setKm] = useState(or.km || '')
+  const [kmSaved, setKmSaved] = useState(!!or.km)
+  const [modal, setModal] = useState(null)
+
+  useEffect(()=>{
+    const q = query(collection(db,'pointages'), where('orId','==',or.id))
+    return onSnapshot(q, snap=>{
+      const data = snap.docs.map(d=>({id:d.id,...d.data()}))
+      data.sort((a,b)=>{ const ta=a.start?.toDate?a.start.toDate():new Date(0); const tb=b.start?.toDate?b.start.toDate():new Date(0); return ta-tb })
+      setOrPointages(data)
+    })
+  },[or.id])
+
+  const [commandes, setCommandes] = useState([])
+  const [commandesLoading, setCommandesLoading] = useState(true)
+
+  useEffect(()=>{
+    if (!or.client) { setCommandesLoading(false); return }
+    const clientLower = or.client.toLowerCase().trim()
+    const noFT = or.noFT
+    // Load all non-archived orders and filter in JS
+    const q = query(collection(dbCommandes,'orders'))
+    return onSnapshot(q, snap=>{
+      console.log('[Commandes] snapshot reçu, docs:', snap.docs.length)
+      const all = snap.docs.map(d=>({id:d.id,...d.data()}))
+      const matched = all.filter(o=>{
+        // Skip archived
+        if (o.archived === true) return false
+        // Priority 1 : match by noFT if available on the order
+        if (o.noFT && noFT && !noFT.startsWith('SANS-FT') && !noFT.startsWith('MANUEL')) {
+          console.log('[Commandes] match FT:', o.noFT, '===', noFT, '->', String(o.noFT).trim() === String(noFT).trim())
+          return String(o.noFT).trim() === String(noFT).trim()
+        }
+        // Fallback : match by client name
+        const c = (o.client||'').toLowerCase().trim()
+        return c && clientLower && (c.includes(clientLower) || clientLower.includes(c))
+      })
+      console.log('[Commandes] matched:', matched.length)
+      // Sort by ts desc
+      matched.sort((a,b)=>{ const ta=a.ts?.toDate?a.ts.toDate():new Date(0); const tb=b.ts?.toDate?b.ts.toDate():new Date(0); return tb-ta })
+      setCommandes(matched)
+      setCommandesLoading(false)
+    })
+  },[or.client])
+
+  useEffect(()=>{
+    const q = query(collection(db,'photos'), where('orId','==',or.id))
+    return onSnapshot(q, snap=>{
+      const all=[]
+      snap.docs.forEach(d=>{ const data=d.data(); (data.photos||[]).forEach(p=>all.push({...p,docId:d.id})) })
+      setOrPhotos(all)
+    })
+  },[or.id])
+
+  const saveKm = async () => {
+    if (!km || !or.id || or.id.startsWith('internal_')) return
+    await updateDoc(doc(db,'ors',or.id), { km: parseInt(km) })
+    setKmSaved(true)
+  }
+
+  const setWaiting = async (motif) => {
+    await updateDoc(doc(db,'ors',or.id), {
+      status: 'waiting',
+      waitingMotif: motif || '',
+      waitingSince: serverTimestamp(),
+    })
+    setModal(null)
+  }
+
+  const setActive = async () => {
+    await updateDoc(doc(db,'ors',or.id), {
+      status: 'active',
+      waitingMotif: '',
+      waitingSince: null,
+    })
+  }
+
+  const totalMin = orPointages.filter(p=>p.end!==null&&!p.isStandaloneNote).reduce((s,p)=>s+(p.duration_min||0),0)
+  const totalDisplay = fmtMin(totalMin+(isMine?Math.floor(elapsed/60):0))
+
+  const addNote = async (text) => {
+    if (!text.trim()) return
+    await addDoc(collection(db,'pointages'),{
+      mechanic:user.id, mechanicName:user.name, orId:or.id, noFT:or.noFT,
+      client:or.client, vehicule:or.vehicule, dateKey:today(),
+      start:serverTimestamp(), end:serverTimestamp(),
+      duration_min:0, note:text, isStandaloneNote:true,
+    })
+  }
+
+  return (
+    <div style={s.detail}>
+      <div style={s.detailBar}>
+        <button style={s.backBtn} onClick={onBack}>← Retour</button>
+        <div style={{display:'flex', alignItems:'center', gap:10}}>
+          {isWaiting && <span style={s.waitingChip}>⏸ En attente</span>}
+          {totalDisplay && <span style={{...s.totalChip, color, borderColor:color+'44'}}>{totalDisplay} total</span>}
+        </div>
+      </div>
+
+      {/* OR info */}
+      <div style={{...s.orCard, borderColor:isMine?color:isWaiting?'#555':'#222'}}>
+        {isMine && <div style={{...s.orCardAccent, background:color}}/>}
+        {isWaiting && !isMine && <div style={{...s.orCardAccent, background:'#555'}}/>}
+        <div style={s.orCardBody}>
+          <div style={s.orCardMeta}>
+            <span style={s.orCardNum}>{or.sansFT?<span style={{color:'#e84747'}}>Sans FT ⚠</span>:`OR ${or.noFT}`}</span>
+            {or.mécano && <span style={s.orCardAssign}>→ {or.mécano}</span>}
+          </div>
+          <div style={s.orCardClient}>{or.client}</div>
+          {or.vehicule && <div style={s.orCardVehicle}>{or.vehicule}{or.plaques&&<span style={s.orCardPlates}> · {or.plaques}</span>}</div>}
+          {or.travaux && (
+            <div style={s.orCardTravaux}>
+              <div style={s.orCardTrLabel}>À FAIRE</div>
+              <div style={s.orCardTrText}>{or.travaux}</div>
+            </div>
+          )}
+          {isWaiting && (
+            <div style={s.waitingInfo}>
+              <span style={s.waitingInfoLabel}>⏸ EN ATTENTE</span>
+              {or.waitingMotif && <span style={s.waitingInfoMotif}>{or.waitingMotif}</span>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* KM */}
+      <div style={s.kmBlock}>
+        <span style={s.kmLabel}>KILOMÉTRAGE</span>
+        <div style={s.kmRow}>
+          <input style={{...s.kmInput, borderColor:kmSaved?color+'60':'#2a2a2a'}}
+            type="number" placeholder="Ex : 153 310"
+            value={km} onChange={e=>{setKm(e.target.value);setKmSaved(false)}} onBlur={saveKm}/>
+          {kmSaved ? <span style={{...s.kmStatus,color}}>✓ Enregistré</span>
+            : km ? <button style={{...s.kmSaveBtn, background:color, color:'#000'}} onClick={saveKm}>Enregistrer</button> : null}
+        </div>
+      </div>
+
+      {/* GO / STOP / WAITING */}
+      <div style={s.timerZone}>
+        {isMine ? (
+          <>
+            <div style={{...s.timerBig, color}}>{fmtDuration(elapsed)}</div>
+            <button style={{...s.stopBig, borderColor:color, color}} onClick={()=>setModal('stop')}>■  ARRÊTER LE TIMBRAGE</button>
+          </>
+        ) : isWaiting ? (
+          <button style={{...s.goBig, background:'#222', color:'#aaa'}} onClick={setActive}>
+            ▶  REPRENDRE LE DOSSIER
+          </button>
+        ) : (
+          <button style={{...s.goBig, background:color}} onClick={onStart}>▶  DÉMARRER LE TIMBRAGE</button>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div style={s.actionsRow}>
+        <button style={s.actionBtn} onClick={()=>setModal('note')}>📝 Note</button>
+        <button style={{...s.actionBtn, position:'relative'}} onClick={()=>setModal('photo')}>
+          📷 Photos
+          {orPhotos.length>0 && <span style={{...s.photoBadge, background:color, color:'#000'}}>{orPhotos.length}</span>}
+        </button>
+        <button style={{
+          ...s.actionBtn,
+          color: isWaiting ? '#47e88a' : '#e84747',
+          borderColor: isWaiting ? 'rgba(71,232,138,0.2)' : 'rgba(232,71,71,0.2)',
+        }} onClick={isWaiting ? setActive : ()=>setModal('waiting')}>
+          {isWaiting ? '▶ Réactiver' : '⏸ Attente'}
+        </button>
+      </div>
+
+      {/* Photo thumbnails */}
+      {orPhotos.length>0 && (
+        <div style={s.photoPreview}>
+          <div style={s.sectionLabel}>PHOTOS · {orPhotos.length}</div>
+          <div style={s.thumbRow}>
+            {orPhotos.map((p,i)=>(
+              <a key={i} href={p.url} target="_blank" rel="noreferrer"><img src={p.url} alt="" style={s.thumbSmall}/></a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Commandes liées */}
+      {(commandesLoading || commandes.length>0) && (
+        <div style={s.history}>
+          <div style={s.historyTitle}>
+            COMMANDES PIÈCES · {commandesLoading ? '...' : commandes.length}
+          </div>
+          {commandesLoading && <div style={{padding:'14px 16px', color:'#444', fontSize:13}}>Chargement...</div>}
+          {!commandesLoading && commandes.map(cmd=>{
+            const statusColor = cmd.status==='invoiced'?'#47e88a':cmd.status==='ordered'?'#e8c547':'#888'
+            const statusLabel = cmd.status==='invoiced'?'Facturé':cmd.status==='ordered'?'Commandé':cmd.status||'—'
+            const supplier = cmd.supplier==='Autre' ? (cmd.supplierOther||'Autre') : (cmd.supplier||'—')
+            const date = cmd.ts?.toDate ? cmd.ts.toDate().toLocaleDateString('fr-CH',{day:'numeric',month:'short'}) : ''
+            const totalPrice = (cmd.parts||[]).reduce((s,p)=>s+parseFloat(p.price||0)*parseInt(p.qty||1),0)
+            return (
+              <div key={cmd.id} style={s.cmdCard}>
+                <div style={s.cmdHead}>
+                  <div style={s.cmdLeft}>
+                    <span style={s.cmdMechanic}>{cmd.mechanic||'—'}</span>
+                    <span style={s.cmdSupplier}>{supplier}</span>
+                    {date && <span style={s.cmdDate}>{date}</span>}
+                  </div>
+                  <div style={s.cmdRight}>
+                    <span style={{...s.cmdStatus, color:statusColor, borderColor:statusColor+'44'}}>{statusLabel}</span>
+                    {totalPrice>0 && <span style={s.cmdTotal}>{totalPrice.toFixed(2)} CHF</span>}
+                  </div>
+                </div>
+                {(cmd.parts||[]).map((p,i)=>(
+                  <div key={i} style={s.cmdPart}>
+                    <span style={s.cmdPartDesc}>{p.description}</span>
+                    <span style={s.cmdPartQty}>×{p.qty||1}</span>
+                  </div>
+                ))}
+                {cmd.notes && <div style={s.cmdNotes}>{cmd.notes}</div>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Historique — tous les pointages, pas juste aujourd'hui */}
+      {orPointages.length>0 && (
+        <div style={s.history}>
+          <div style={s.historyTitle}>HISTORIQUE COMPLET</div>
+          {orPointages.map(p=>(
+            <div key={p.id} style={s.histRow}>
+              <div style={s.histLeft}>
+                <div style={s.histTop}>
+                  <span style={{...s.histName, color:USER_COLORS[p.mechanic]||'#ccc'}}>{p.mechanicName}</span>
+                  <span style={s.histTime}>
+                    {p.isStandaloneNote ? `Note · ${fmtDate(p.start)} ${fmtTime(p.start)}`
+                      : `${fmtDate(p.start)} ${fmtTime(p.start)}${p.end?` → ${fmtTime(p.end)}`:' → en cours'}`}
+                  </span>
+                </div>
+                {p.note && <div style={s.histNote}>{p.note}</div>}
+              </div>
+              <div style={{...s.histDur, color:p.end===null?(USER_COLORS[p.mechanic]||color):'#aaa'}}>
+                {p.isStandaloneNote?'📝':p.end===null?'⏱':fmtMin(p.duration_min)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {modal==='stop' && <NoteOverlay color={color} title="Rapport de fin" subtitle={`OR ${or.noFT} · ${or.client}`} onConfirm={note=>{onStop(note);setModal(null)}}/>}
+      {modal==='note' && <NoteOverlay color={color} title="Ajouter une note" subtitle={`OR ${or.noFT} · ${or.client}`} onConfirm={async text=>{await addNote(text);setModal(null)}}/>}
+      {modal==='photo' && <PhotoUploader or={or} color={color} onClose={()=>setModal(null)}/>}
+      {modal==='waiting' && <WaitingOverlay color={color} or={or} onConfirm={setWaiting} onCancel={()=>setModal(null)}/>}
+    </div>
+  )
+}
+
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
+export default function MechanicScreen({ user, onLogout, onDashboard }) {
+  const [todayOrs, setTodayOrs] = useState([])
+  const [waitingOrs, setWaitingOrs] = useState([])
+  const [orTotals, setOrTotals] = useState({})
+  const [activeOR, setActiveOR] = useState(null)
+  const [elapsed, setElapsed] = useState(0)
+  const [selectedOR, setSelectedOR] = useState(null)
+  const [tab, setTab] = useState('today') // 'today' | 'waiting'
+  const [modal, setModal] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const timerRef = useRef(null)
+  const color = USER_COLORS[user.id] || '#e8c547'
+
+  // Today's ORs
+  useEffect(()=>{
+    const q = query(collection(db,'ors'), where('dateKey','==',today()))
+    return onSnapshot(q, snap=>{
+      let data = snap.docs.map(d=>({id:d.id,...d.data()}))
+      if (user.role==='carrossier') data=data.filter(o=>o.isCarrosserie)
+      else data=data.filter(o=>!o.isCarrosserie)
+      // Active first, then waiting, then retired
+      data.sort((a,b)=>{
+        const score = o => o.activeMechanics?.length>0 ? 0 : o.status==='waiting' ? 2 : o.retired ? 3 : 1
+        return score(a)-score(b)
+      })
+      setTodayOrs(data)
+      setSelectedOR(prev=>prev?(data.find(o=>o.id===prev.id)||waitingOrs.find(o=>o.id===prev.id)||prev):null)
+      setLoading(false)
+    })
+  },[user.role])
+
+  // Waiting ORs (across all dates, not retired)
+  useEffect(()=>{
+    const q = query(collection(db,'ors'), where('status','==','waiting'))
+    return onSnapshot(q, snap=>{
+      let data = snap.docs.map(d=>({id:d.id,...d.data()}))
+      if (user.role==='carrossier') data=data.filter(o=>o.isCarrosserie)
+      else data=data.filter(o=>!o.isCarrosserie)
+      // Exclude those already in today's list
+      const todayIds = new Set(todayOrs.map(o=>o.id))
+      data = data.filter(o=>!todayIds.has(o.id))
+      setWaitingOrs(data)
+    })
+  },[user.role, todayOrs])
+
+  // Totals (all time per OR)
+  useEffect(()=>{
+    const q = query(collection(db,'pointages'))
+    return onSnapshot(q, snap=>{
+      const t={}
+      snap.docs.forEach(d=>{ const p=d.data(); if(p.duration_min&&p.orId&&!p.isStandaloneNote) t[p.orId]=(t[p.orId]||0)+p.duration_min })
+      setOrTotals(t)
+    })
+  },[])
+
+  // Recover active on reload
+  useEffect(()=>{
+    getDocs(query(collection(db,'pointages'), where('mechanic','==',user.id), where('dateKey','==',today()), where('end','==',null)))
+      .then(snap=>{ if(!snap.empty){ const d=snap.docs[0],data=d.data(); setActiveOR({orId:data.orId,pointageId:d.id,startTs:data.start?.toDate?data.start.toDate():new Date(data.start)}) }})
+  },[user.id])
+
+  useEffect(()=>{
+    if(activeOR) timerRef.current=setInterval(()=>setElapsed(Math.floor((Date.now()-activeOR.startTs.getTime())/1000)),1000)
+    else { clearInterval(timerRef.current); setElapsed(0) }
+    return ()=>clearInterval(timerRef.current)
+  },[activeOR])
+
+  const startOR = async (or) => {
+    if(activeOR) {
+      const dur=Math.round((new Date()-activeOR.startTs)/60000)
+      await updateDoc(doc(db,'pointages',activeOR.pointageId),{end:serverTimestamp(),duration_min:dur,note:''})
+      const prev=[...todayOrs,...waitingOrs].find(o=>o.id===activeOR.orId)
+      if(prev) await updateDoc(doc(db,'ors',activeOR.orId),{activeMechanics:(prev.activeMechanics||[]).filter(m=>m!==user.id)})
+    }
+    // If waiting, reactivate
+    if(or.status==='waiting') await updateDoc(doc(db,'ors',or.id),{status:'active',waitingMotif:'',waitingSince:null})
+    const startTs=new Date()
+    const r=await addDoc(collection(db,'pointages'),{mechanic:user.id,mechanicName:user.name,orId:or.id,noFT:or.noFT,client:or.client,vehicule:or.vehicule,dateKey:today(),start:serverTimestamp(),end:null,duration_min:null,note:''})
+    await updateDoc(doc(db,'ors',or.id),{activeMechanics:[...(or.activeMechanics||[]).filter(m=>m!==user.id),user.id]})
+    setActiveOR({orId:or.id,pointageId:r.id,startTs})
+  }
+
+  const stopOR = async (note) => {
+    if(!activeOR) return
+    const dur=Math.round((new Date()-activeOR.startTs)/60000)
+    await updateDoc(doc(db,'pointages',activeOR.pointageId),{end:serverTimestamp(),duration_min:dur,note:note||''})
+    const or=[...todayOrs,...waitingOrs].find(o=>o.id===activeOR.orId)
+    if(or) await updateDoc(doc(db,'ors',activeOR.orId),{activeMechanics:(or.activeMechanics||[]).filter(m=>m!==user.id)})
+    setActiveOR(null)
+  }
+
+  const allOrs = tab==='today' ? todayOrs : waitingOrs
+  const activeOrData = [...todayOrs,...waitingOrs].find(o=>o.id===activeOR?.orId)
+
+  return (
+    <div style={s.root}>
+      <div style={s.header}>
+        {!selectedOR && <div style={{...s.avatar, background:color+'25', color}}>{user.name[0]}</div>}
+        <div style={s.hCenter}>
+          {selectedOR
+            ? <span style={s.hTitle}>{selectedOR.client}</span>
+            : <><span style={{...s.hName,color}}>{user.name}</span><span style={s.hSub}>{user.role==='carrossier'?'Carrosserie':'Atelier'} · {new Date().toLocaleDateString('fr-CH',{weekday:'long',day:'numeric',month:'long'})}</span></>
+          }
+        </div>
+        {!selectedOR && <button style={s.iconBtn} onClick={onDashboard}>⊞</button>}
+        {!selectedOR && <button style={s.iconBtn} onClick={onLogout}>↩</button>}
+      </div>
+
+      {/* Mini banner chrono actif */}
+      {!selectedOR && activeOR && activeOrData && (
+        <button style={{...s.miniBanner, background:color+'15', borderColor:color+'60'}} onClick={()=>setSelectedOR(activeOrData)}>
+          <span style={{...s.miniTimer,color}}>⏱ {fmtDuration(elapsed)}</span>
+          <span style={s.miniInfo}><strong style={{color:'#fff'}}>{activeOrData.client}</strong> · {activeOrData.vehicule}</span>
+          <span style={{color,fontSize:18,fontWeight:700}}>→</span>
+        </button>
+      )}
+
+      {!selectedOR && (
+        <>
+          {/* Tabs */}
+          <div style={s.tabs}>
+            <button style={{...s.tab, color:tab==='today'?'#fff':'#555', borderBottom:`2px solid ${tab==='today'?color:'transparent'}`}} onClick={()=>setTab('today')}>
+              Aujourd'hui <span style={s.tabCount}>{todayOrs.length}</span>
+            </button>
+            <button style={{...s.tab, color:tab==='waiting'?'#fff':'#555', borderBottom:`2px solid ${tab==='waiting'?'#888':'transparent'}`}} onClick={()=>setTab('waiting')}>
+              En attente
+              {waitingOrs.length>0 && <span style={{...s.tabCount, background:'#333', color:'#aaa'}}>{waitingOrs.length}</span>}
+            </button>
+          </div>
+
+          <div style={s.list}>
+            {loading && <div style={s.empty}>Chargement...</div>}
+            {!loading && allOrs.length===0 && (
+              <div style={s.empty}>
+                {tab==='today' ? 'Aucun OR pour aujourd\'hui' : 'Aucun dossier en attente'}
+              </div>
+            )}
+            {!loading && allOrs.map(or=>(
+              <ORCard key={or.id} or={or} user={user} activeOR={activeOR} elapsed={elapsed} orTotals={orTotals} onSelect={setSelectedOR}/>
+            ))}
+          </div>
+
+          <div style={s.bottomRow}>
+            <button style={s.internalBtn} onClick={()=>setSelectedOR({id:'internal_'+Date.now(),noFT:'INT',client:'Tâche interne',vehicule:'',plaques:'',travaux:'',activeMechanics:[],dateKey:today(),isCarrosserie:user.role==='carrossier',sansFT:false,status:'active'})}>
+              + Tâche interne
+            </button>
+            <button style={s.createOrBtn} onClick={()=>setModal('createOR')}>
+              + Créer un OR
+            </button>
+          </div>
+        </>
+      )}
+
+      {selectedOR && (
+        <ORDetail or={selectedOR} user={user} activeOR={activeOR} elapsed={elapsed}
+          onBack={()=>setSelectedOR(null)} onStart={()=>startOR(selectedOR)} onStop={stopOR}/>
+      )}
+
+      {modal==='createOR' && (
+        <div style={s.overlay}>
+          <div style={{...s.noteBox, maxHeight:'90vh', overflowY:'auto'}}>
+            <p style={s.noteTitle}>Créer un OR</p>
+            <p style={s.noteSub}>FT longue durée ou hors planning</p>
+            <CreateORForm color={color} user={user}
+              onSave={async(fields)=>{ await createManualOR(fields, user); setModal(null) }}
+              onCancel={()=>setModal(null)}
+            />
+          </div>
+        </div>
+      )}
+      <div style={{height:28}}/>
+    </div>
+  )
+}
+
+const s = {
+  root: { minHeight:'100dvh', background:'#0d0d0d', display:'flex', flexDirection:'column' },
+  header: { display:'flex', alignItems:'center', gap:12, padding:'16px 16px 14px', borderBottom:'1px solid #1e1e1e', position:'sticky', top:0, background:'#0d0d0d', zIndex:10 },
+  avatar: { width:42, height:42, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:18, flexShrink:0 },
+  hCenter: { flex:1, display:'flex', flexDirection:'column', minWidth:0 },
+  hName: { fontWeight:800, fontSize:20, lineHeight:1.1 },
+  hSub: { fontSize:13, color:'#666', marginTop:2, textTransform:'capitalize' },
+  hTitle: { fontWeight:800, fontSize:19, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' },
+  iconBtn: { background:'transparent', color:'#666', fontSize:20, padding:'6px 8px', cursor:'pointer' },
+  miniBanner: { display:'flex', alignItems:'center', gap:10, margin:'10px 14px', padding:'13px 16px', borderRadius:12, border:'1px solid', cursor:'pointer' },
+  miniTimer: { fontFamily:'var(--font-mono)', fontSize:16, fontWeight:700, flexShrink:0 },
+  miniInfo: { flex:1, fontSize:14, color:'#aaa', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' },
+  tabs: { display:'flex', borderBottom:'1px solid #1e1e1e' },
+  tab: { flex:1, padding:'12px', background:'transparent', border:'none', fontSize:15, fontWeight:600, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8, transition:'all 0.15s' },
+  tabCount: { fontSize:12, background:'#1e1e1e', color:'#777', padding:'2px 8px', borderRadius:20, fontWeight:700 },
+  list: { flex:1, padding:'10px 12px', display:'flex', flexDirection:'column', gap:10 },
+  empty: { textAlign:'center', color:'#444', fontSize:16, padding:'64px 16px' },
+  bottomRow: { padding:'8px 12px 0', display:'flex', gap:8 },
+  createOrBtn: { flex:1, padding:'14px', background:'transparent', border:'1px solid #2a2a2a', borderRadius:12, color:'#888', fontSize:14, fontWeight:600, cursor:'pointer' },
+  internalBtn: { width:'100%', padding:'14px', background:'transparent', border:'1px dashed #222', borderRadius:12, color:'#555', fontSize:14, cursor:'pointer' },
+  card: { display:'flex', borderRadius:14, border:'1px solid', textAlign:'left', transition:'all 0.12s', cursor:'pointer', overflow:'hidden', position:'relative' },
+  cardActiveLine: { width:4, flexShrink:0 },
+  cardInner: { flex:1, padding:'15px 16px', display:'flex', flexDirection:'column', gap:5 },
+  cardRow1: { display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 },
+  orLabel: { fontFamily:'var(--font-mono)', fontSize:13, color:'#888', fontWeight:500 },
+  cardBadges: { display:'flex', alignItems:'center', gap:6, flexShrink:0 },
+  activeBadge: { fontSize:12, fontWeight:700, padding:'3px 10px', borderRadius:20 },
+  otherBadge: { fontSize:11, color:'#aaa', background:'#1e1e1e', padding:'3px 9px', borderRadius:20 },
+  timeBadge: { fontSize:13, fontFamily:'var(--font-mono)', fontWeight:700 },
+  clientName: { fontSize:22, fontWeight:800, color:'#ffffff', lineHeight:1.2 },
+  vehicleRow: { display:'flex', alignItems:'center', gap:8, marginTop:2 },
+  vehicleText: { fontSize:16, fontWeight:600, color:'#ccc' },
+  platesText: { fontSize:14, color:'#888', fontFamily:'var(--font-mono)' },
+  travauxBox: { fontSize:14, color:'#bbb', lineHeight:1.55, marginTop:4, paddingTop:6, borderTop:'1px solid #1e1e1e' },
+  waitingTag: { fontSize:13, color:'#888', fontWeight:600, marginTop:4 },
+  waitingSince: { fontSize:11, color:'#555', fontFamily:'var(--font-mono)' },
+  retiredTag: { fontSize:12, color:'#e84747', marginTop:4, fontWeight:600 },
+  openHint: { fontSize:13, fontWeight:600, marginTop:6 },
+  detail: { flex:1, display:'flex', flexDirection:'column', overflowY:'auto' },
+  detailBar: { display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 16px 10px' },
+  backBtn: { background:'transparent', color:'#888', fontSize:15, fontWeight:600, cursor:'pointer', padding:'4px 0' },
+  totalChip: { fontFamily:'var(--font-mono)', fontSize:14, fontWeight:700, border:'1px solid', padding:'4px 12px', borderRadius:20 },
+  waitingChip: { fontSize:12, fontWeight:700, color:'#888', background:'#1e1e1e', padding:'4px 12px', borderRadius:20 },
+  orCard: { margin:'0 14px 4px', borderRadius:14, border:'1px solid', background:'#111', position:'relative', overflow:'hidden' },
+  orCardAccent: { position:'absolute', left:0, top:0, bottom:0, width:5 },
+  orCardBody: { padding:'16px 16px 16px 22px', display:'flex', flexDirection:'column', gap:6 },
+  orCardMeta: { display:'flex', alignItems:'center', justifyContent:'space-between' },
+  orCardNum: { fontFamily:'var(--font-mono)', fontSize:13, color:'#888' },
+  orCardAssign: { fontSize:12, color:'#666' },
+  orCardClient: { fontSize:26, fontWeight:800, color:'#ffffff', lineHeight:1.2 },
+  orCardVehicle: { fontSize:17, fontWeight:600, color:'#ccc', marginTop:2 },
+  orCardPlates: { fontFamily:'var(--font-mono)', fontSize:15, color:'#888' },
+  orCardTravaux: { marginTop:8, paddingTop:10, borderTop:'1px solid #1e1e1e' },
+  orCardTrLabel: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', marginBottom:6 },
+  orCardTrText: { fontSize:15, color:'#ccc', lineHeight:1.65 },
+  waitingInfo: { marginTop:8, paddingTop:8, borderTop:'1px solid #1e1e1e', display:'flex', flexDirection:'column', gap:4 },
+  waitingInfoLabel: { fontSize:10, letterSpacing:'0.18em', color:'#666', fontFamily:'var(--font-mono)' },
+  waitingInfoMotif: { fontSize:15, color:'#aaa', fontWeight:600 },
+  kmBlock: { margin:'8px 14px', padding:'14px 16px', background:'#111', borderRadius:12, border:'1px solid #1e1e1e' },
+  kmLabel: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', display:'block', marginBottom:10 },
+  kmRow: { display:'flex', alignItems:'center', gap:10 },
+  kmInput: { flex:1, background:'#0d0d0d', border:'1px solid', borderRadius:8, color:'#fff', fontSize:20, fontWeight:700, padding:'10px 14px', outline:'none', fontFamily:'var(--font-mono)' },
+  kmSaveBtn: { padding:'10px 18px', borderRadius:8, fontWeight:700, fontSize:14, cursor:'pointer', border:'none', flexShrink:0 },
+  kmStatus: { fontSize:14, fontWeight:600, flexShrink:0 },
+  timerZone: { display:'flex', flexDirection:'column', alignItems:'center', padding:'24px 20px 16px', gap:18 },
+  timerBig: { fontFamily:'var(--font-mono)', fontSize:64, fontWeight:500, letterSpacing:'0.02em', lineHeight:1 },
+  goBig: { width:'100%', maxWidth:320, padding:'22px', borderRadius:18, fontWeight:800, fontSize:22, letterSpacing:'0.14em', cursor:'pointer', color:'#000', border:'none' },
+  stopBig: { width:'100%', maxWidth:320, padding:'20px', borderRadius:18, fontWeight:800, fontSize:20, letterSpacing:'0.1em', cursor:'pointer', background:'transparent', border:'2px solid' },
+  actionsRow: { display:'flex', gap:8, padding:'0 14px 12px' },
+  actionBtn: { flex:1, padding:'14px 8px', background:'#161616', border:'1px solid #2a2a2a', borderRadius:12, color:'#ccc', fontSize:14, fontWeight:600, cursor:'pointer', position:'relative', transition:'all 0.15s' },
+  photoBadge: { position:'absolute', top:-6, right:-6, width:20, height:20, borderRadius:'50%', fontSize:11, fontWeight:800, display:'flex', alignItems:'center', justifyContent:'center' },
+  photoPreview: { margin:'0 14px 12px', background:'#111', border:'1px solid #1e1e1e', borderRadius:12, overflow:'hidden' },
+  sectionLabel: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', padding:'10px 14px 8px', borderBottom:'1px solid #1a1a1a' },
+  thumbRow: { display:'flex', gap:8, padding:'10px 14px', overflowX:'auto' },
+  thumbSmall: { width:72, height:72, objectFit:'cover', borderRadius:8, flexShrink:0, border:'1px solid #2a2a2a' },
+  history: { margin:'0 14px 16px', border:'1px solid #1e1e1e', borderRadius:14, overflow:'hidden', background:'#111' },
+  historyTitle: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', padding:'12px 16px 8px', borderBottom:'1px solid #1a1a1a' },
+  histRow: { display:'flex', alignItems:'flex-start', justifyContent:'space-between', padding:'13px 16px', gap:12, borderBottom:'1px solid #161616' },
+  histLeft: { display:'flex', flexDirection:'column', gap:4, flex:1, minWidth:0 },
+  histTop: { display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' },
+  histName: { fontSize:15, fontWeight:800, textTransform:'uppercase', letterSpacing:'0.04em' },
+  histTime: { fontSize:12, color:'#666', fontFamily:'var(--font-mono)' },
+  histNote: { fontSize:15, color:'#ddd', lineHeight:1.55, marginTop:2 },
+  histDur: { fontFamily:'var(--font-mono)', fontSize:16, fontWeight:700, flexShrink:0, paddingTop:2 },
+  overlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.92)', display:'flex', alignItems:'flex-end', zIndex:100, padding:14 },
+  noteBox: { width:'100%', background:'#131313', borderRadius:18, padding:20, border:'1px solid #2a2a2a', display:'flex', flexDirection:'column', gap:14 },
+  photoBox: { width:'100%', background:'#131313', borderRadius:18, padding:20, border:'1px solid #2a2a2a', display:'flex', flexDirection:'column', gap:14, maxHeight:'85vh', overflowY:'auto' },
+  noteTitle: { fontSize:20, fontWeight:800, color:'#fff', margin:0 },
+  noteSub: { fontSize:14, color:'#777', margin:0 },
+  noteTA: { width:'100%', background:'#0d0d0d', border:'1px solid #2a2a2a', borderRadius:10, color:'#f0f0f0', fontSize:16, padding:'14px', resize:'none', outline:'none', fontFamily:'var(--font-body)', lineHeight:1.6 },
+  voiceBtn: { padding:'14px', borderRadius:10, border:'1px solid', fontSize:16, fontWeight:600, cursor:'pointer', transition:'all 0.15s', textAlign:'center' },
+  listenLabel: { fontSize:14, fontFamily:'var(--font-mono)', textAlign:'center', margin:0 },
+  noteActions: { display:'flex', gap:10 },
+  skipBtn: { flex:1, padding:'14px', background:'transparent', border:'1px solid #2a2a2a', borderRadius:10, color:'#666', fontSize:15, fontWeight:600, cursor:'pointer' },
+  okBtn: { flex:2, padding:'14px', borderRadius:10, fontSize:16, fontWeight:800, cursor:'pointer' },
+  motifGrid: { display:'flex', flexDirection:'column', gap:8 },
+  motifBtn: { padding:'13px 16px', borderRadius:10, border:'1px solid', fontSize:15, fontWeight:600, cursor:'pointer', textAlign:'left', transition:'all 0.12s' },
+  photoDropZone: { border:'2px dashed #2a2a2a', borderRadius:14, padding:'40px 20px', display:'flex', flexDirection:'column', alignItems:'center', gap:14, cursor:'pointer', background:'#0d0d0d' },
+  photoIcon: { fontSize:52 },
+  photoDropLabel: { fontSize:17, fontWeight:700, color:'#fff', textAlign:'center' },
+  photoDropSub: { fontSize:13, color:'#555', textAlign:'center' },
+  uploadingState: { display:'flex', flexDirection:'column', alignItems:'center', gap:16 },
+  spinner: { width:36, height:36, border:'3px solid #2a2a2a', borderRadius:'50%', animation:'spin 0.8s linear infinite' },
+  uploadedList: { display:'flex', flexDirection:'column', alignItems:'center', gap:14 },
+  successIcon: { width:56, height:56, borderRadius:'50%', background:'rgba(71,232,138,0.15)', color:'#47e88a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:24, fontWeight:700 },
+  successText: { fontSize:17, fontWeight:700, color:'#fff', margin:0 },
+  thumbGrid: { display:'flex', flexWrap:'wrap', gap:8, justifyContent:'center' },
+  thumb: { width:90, height:90, objectFit:'cover', borderRadius:10, border:'1px solid #2a2a2a' },
+  addMoreBtn: { padding:'12px 20px', background:'transparent', border:'1px solid', borderRadius:10, fontSize:14, fontWeight:600, cursor:'pointer' },
+  errorMsg: { fontSize:13, color:'#e84747', textAlign:'center', margin:0 },
+  cmdCard: { borderBottom:'1px solid #161616', padding:'12px 16px', display:'flex', flexDirection:'column', gap:6 },
+  cmdHead: { display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 },
+  cmdLeft: { display:'flex', flexDirection:'column', gap:2 },
+  cmdMechanic: { fontSize:12, fontWeight:700, color:'#888', textTransform:'uppercase', letterSpacing:'0.06em' },
+  cmdSupplier: { fontSize:14, fontWeight:700, color:'#fff' },
+  cmdDate: { fontSize:11, color:'#555', fontFamily:'var(--font-mono)' },
+  cmdRight: { display:'flex', flexDirection:'column', alignItems:'flex-end', gap:4 },
+  cmdStatus: { fontSize:11, fontWeight:700, border:'1px solid', padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em' },
+  cmdTotal: { fontSize:13, fontFamily:'var(--font-mono)', color:'#aaa', fontWeight:600 },
+  cmdPart: { display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 },
+  cmdPartDesc: { fontSize:13, color:'#bbb', lineHeight:1.4, flex:1 },
+  cmdPartQty: { fontSize:12, color:'#666', fontFamily:'var(--font-mono)', flexShrink:0 },
+  cmdNotes: { fontSize:12, color:'#555', fontStyle:'italic', lineHeight:1.4 },
+}
