@@ -1,11 +1,15 @@
 import { useState, useEffect } from 'react'
-import { collection, query, where, onSnapshot, deleteDoc, doc } from 'firebase/firestore'
+import { collection, query, where, onSnapshot, deleteDoc, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../firebase.js'
 
 const TEAM = [
-  { id:'jose',    name:'José',    label:'Mécanicien', color:'#4fc3f7' },
-  { id:'vivian',  name:'Vivian',  label:'Mécanicien', color:'#6ee7a0' },
-  { id:'valentin',name:'Valentin',label:'Carrossier', color:'#ffb74d' },
+  { id:'jose',     name:'José',     label:'Mécanicien · Challenge', color:'#4fc3f7' },
+  { id:'vivian',   name:'Vivian',   label:'Mécanicien · Challenge', color:'#6ee7a0' },
+  { id:'valentin', name:'Valentin', label:'Carrossier · Challenge', color:'#ffb74d' },
+  { id:'marius_c', name:'Marius',   label:'Mécanicien · Challenge', color:'#f472b6' },
+  { id:'damien_c', name:'Damien',   label:'Mécanicien · Challenge', color:'#a78bfa' },
+  { id:'marius',   name:'Marius',   label:'Mécanicien · GT',        color:'#f472b6' },
+  { id:'damien',   name:'Damien',   label:'Mécanicien · GT',        color:'#a78bfa' },
 ]
 
 function today() { return new Date().toISOString().split('T')[0] }
@@ -30,9 +34,47 @@ function buildRapportByOR(pointages) {
   return Object.values(map)
 }
 
+function ORPointages({ orId }) {
+  const [pointages, setPointages] = useState([])
+  useEffect(()=>{
+    const q = query(collection(db,'pointages'), where('orId','==',orId))
+    return onSnapshot(q, snap=>{
+      const data = snap.docs.map(d=>({id:d.id,...d.data()}))
+      data.sort((a,b)=>{ const ta=a.start?.toDate?a.start.toDate():new Date(0); const tb=b.start?.toDate?b.start.toDate():new Date(0); return ta-tb })
+      setPointages(data)
+    })
+  },[orId])
+
+  const fmtT = ts => { if(!ts) return ''; const d=ts?.toDate?ts.toDate():new Date(ts); return d.toLocaleDateString('fr-CH',{day:'numeric',month:'short'})+' '+d.toLocaleTimeString('fr-CH',{hour:'2-digit',minute:'2-digit'}) }
+  const fmtMin = min => { if(!min) return null; const h=Math.floor(min/60),m=min%60; return h>0?`${h}h${String(m).padStart(2,'0')}`:`${m}min` }
+  const USER_COLORS = { jose:'#4fc3f7', vivian:'#6ee7a0', valentin:'#ffb74d' }
+  const total = pointages.filter(p=>p.end&&!p.isStandaloneNote).reduce((s,p)=>s+(p.duration_min||0),0)
+
+  return (
+    <div>
+      {total>0 && <div style={{padding:'8px 0', fontSize:14, color:'#aaa'}}>Total : <strong style={{color:'#fff'}}>{fmtMin(total)}</strong></div>}
+      {pointages.length===0 && <div style={{color:'#444',fontSize:13,padding:'16px 0'}}>Aucun pointage</div>}
+      {pointages.map(p=>(
+        <div key={p.id} style={{padding:'10px 0', borderBottom:'1px solid #1e1e1e', display:'flex', justifyContent:'space-between', gap:12}}>
+          <div>
+            <div style={{fontSize:13, fontWeight:700, color:USER_COLORS[p.mechanic]||'#ccc', textTransform:'uppercase'}}>{p.mechanicName}</div>
+            <div style={{fontSize:12, color:'#666', fontFamily:'monospace'}}>{fmtT(p.start)}{p.end?' → '+fmtT(p.end):' → en cours'}</div>
+            {p.note && <div style={{fontSize:13, color:'#ccc', fontStyle:'italic', marginTop:3}}>"{p.note}"</div>}
+          </div>
+          <div style={{fontSize:14, fontWeight:700, color:p.end?'#aaa':'#4fc3f7', flexShrink:0}}>
+            {p.isStandaloneNote?'📝':p.end?fmtMin(p.duration_min):'⏱'}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function DashboardScreen({ onBack, onLogout }) {
+  // Note: useState already imported at top level
   const [sel, setSel] = useState(today())
   const [view, setView] = useState('equipe')
+  const [selectedOR, setSelectedOR] = useState(null)
   const [pointages, setPointages] = useState([])
   const [photos, setPhotos] = useState([]) // all photo docs for sel date
   const [loading, setLoading] = useState(true)
@@ -107,6 +149,21 @@ export default function DashboardScreen({ onBack, onLogout }) {
 
   return (
     <div style={s.root}>
+      {selectedOR && (
+        <div style={s.orOverlay}>
+          <div style={s.orOverlayBox}>
+            <div style={s.orOverlayHead}>
+              <div>
+                <div style={s.orOverlayNum}>OR {selectedOR.noFT}</div>
+                <div style={s.orOverlayClient}>{selectedOR.client}</div>
+                {selectedOR.vehicule && <div style={s.orOverlayVeh}>{selectedOR.vehicule}</div>}
+              </div>
+              <button style={s.orOverlayClose} onClick={()=>setSelectedOR(null)}>✕</button>
+            </div>
+            <ORPointages orId={selectedOR.id} />
+          </div>
+        </div>
+      )}
       <div style={s.header}>
         <button style={s.iconBtn} onClick={onBack}>←</button>
         <span style={s.title}>Tableau de bord</span>
@@ -155,7 +212,7 @@ export default function DashboardScreen({ onBack, onLogout }) {
             {m.mine.length>0 && (
               <div style={s.rows}>
                 {m.mine.map(p=>(
-                  <div key={p.id} style={s.pRow}>
+                  <div key={p.id} style={{...s.pRow, cursor:'pointer'}} onClick={()=>setSelectedOR({id:p.orId, noFT:p.noFT, client:p.client, vehicule:p.vehicule})}>
                     <div style={s.pLeft}>
                       <span style={s.pOR}>OR {p.noFT}</span>
                       <span style={s.pClient}>{p.client}</span>
@@ -180,10 +237,11 @@ export default function DashboardScreen({ onBack, onLogout }) {
               const totalMin=or.entries.filter(e=>e.end!==null&&!e.isStandaloneNote).reduce((s,e)=>s+(e.duration_min||0),0)
               const orData = ors[or.orId]
               const km = orData?.km || or.entries.find(e=>e.km)?.km
+              const orStatus = orData?.status
               const orPhotos = photos.filter(pd=>pd.orId===or.orId)
               const photoCount = orPhotos.reduce((s,pd)=>s+(pd.photos||[]).length,0)
               return (
-                <div key={i} style={s.rapportCard}>
+                <div key={i} style={{...s.rapportCard, cursor:'pointer'}} onClick={()=>setSelectedOR({id:or.orId, noFT:or.noFT, client:or.client, vehicule:or.vehicule})}>
                   <div style={s.rapportHead}>
                     <div>
                       <div style={s.rapportOR}>OR {or.noFT}</div>
@@ -192,7 +250,10 @@ export default function DashboardScreen({ onBack, onLogout }) {
                       {km && <div style={s.rapportKm}>🔢 {km.toLocaleString('fr-CH')} km</div>}
                       {photoCount>0 && <div style={s.rapportPhoto}>📷 {photoCount} photo{photoCount>1?'s':''}</div>}
                     </div>
-                    <span style={s.rapportTotal}>{fmtMin(totalMin)||'en cours'}</span>
+                    <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
+                      <span style={s.rapportTotal}>{fmtMin(totalMin)||'en cours'}</span>
+                      {ors[or.orId]?.status==='completed' && <span style={{fontSize:10,fontWeight:700,color:'#47e88a',background:'rgba(71,232,138,0.1)',padding:'2px 8px',borderRadius:20}}>✓ Terminé</span>}
+                    </div>
                   </div>
                   {or.entries.filter(e=>e.note).length>0 && (
                     <div style={s.rapportNotes}>
@@ -301,4 +362,11 @@ const s = {
   photoItem: { position:'relative' },
   photoThumb: { width:100, height:100, objectFit:'cover', borderRadius:10, border:'1px solid #2a2a2a', display:'block' },
   deleteBtn: { position:'absolute', top:4, right:4, background:'rgba(0,0,0,0.75)', border:'none', borderRadius:6, padding:'4px 6px', fontSize:14, cursor:'pointer', lineHeight:1 },
+  orOverlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', zIndex:50, display:'flex', alignItems:'flex-end', padding:14 },
+  orOverlayBox: { width:'100%', background:'#111', borderRadius:18, padding:20, border:'1px solid #2a2a2a', maxHeight:'80vh', overflowY:'auto' },
+  orOverlayHead: { display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:12 },
+  orOverlayNum: { fontFamily:'monospace', fontSize:12, color:'#666', marginBottom:4 },
+  orOverlayClient: { fontSize:20, fontWeight:800, color:'#fff' },
+  orOverlayVeh: { fontSize:14, color:'#666', marginTop:2 },
+  orOverlayClose: { background:'transparent', border:'none', color:'#666', fontSize:20, cursor:'pointer', padding:'4px 8px' },
 }
