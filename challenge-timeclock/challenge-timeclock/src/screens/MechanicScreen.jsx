@@ -261,8 +261,6 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
       const all = snap.docs.map(d=>({id:d.id,...d.data()}))
       console.log('[Commandes] sample doc:', JSON.stringify(all.find(o=>o.client==='Cattin')))
       const matched = all.filter(o=>{
-        // Skip archived
-        if (o.archived === true) return false
         // Priority 1 : match by noFT if available on the order
         if (o.noFT && noFT && !noFT.startsWith('SANS-FT') && !noFT.startsWith('MANUEL')) {
           console.log('[Commandes] match FT:', o.noFT, '===', noFT, '->', String(o.noFT).trim() === String(noFT).trim())
