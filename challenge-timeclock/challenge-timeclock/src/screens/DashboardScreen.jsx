@@ -41,11 +41,23 @@ export default function DashboardScreen({ onBack, onLogout }) {
   const [deletingPhoto, setDeletingPhoto] = useState(null)
   const dates = Array.from({length:7},(_,i)=>dateKey(i))
 
+  const [ors, setOrs] = useState({}) // map orId -> or data (for km)
+
   useEffect(()=>{
     setLoading(true)
     const q = query(collection(db,'pointages'), where('dateKey','==',sel))
     return onSnapshot(q, snap=>{ setPointages(snap.docs.map(d=>({id:d.id,...d.data()}))); setLoading(false) })
   },[sel])
+
+  // Load ors to get km (not date-filtered, we need the actual OR data)
+  useEffect(()=>{
+    const q = query(collection(db,'ors'))
+    return onSnapshot(q, snap=>{
+      const map = {}
+      snap.docs.forEach(d=>{ const data=d.data(); if(data.km) map[d.id]=data })
+      setOrs(map)
+    })
+  },[])
 
   useEffect(()=>{
     const q = query(collection(db,'photos'), where('dateKey','==',sel))
@@ -171,7 +183,8 @@ export default function DashboardScreen({ onBack, onLogout }) {
             <button style={s.copyBtn} onClick={copyRapport}>{copied?'✓ Copié !':'📋 Copier tout le rapport'}</button>
             {rapportByOR.map((or,i)=>{
               const totalMin=or.entries.filter(e=>e.end!==null&&!e.isStandaloneNote).reduce((s,e)=>s+(e.duration_min||0),0)
-              const km = or.entries.find(e=>e.km)?.km
+              const orData = ors[or.orId]
+              const km = orData?.km || or.entries.find(e=>e.km)?.km
               const orPhotos = photos.filter(pd=>pd.orId===or.orId)
               const photoCount = orPhotos.reduce((s,pd)=>s+(pd.photos||[]).length,0)
               return (
