@@ -362,11 +362,17 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
     return onSnapshot(q, snap=>{
       const all = snap.docs.map(d=>({id:d.id,...d.data()}))
       const matched = all.filter(o=>{
+        // Exclude invoiced orders — already attributed to an OR
+        if (o.status === 'invoiced') return false
         // Priority 1 : match by noFT if available on the order
         if (o.noFT && noFT && !noFT.startsWith('SANS-FT') && !noFT.startsWith('MANUEL')) {
           return String(o.noFT).trim() === String(noFT).trim()
         }
-        // Fallback : match by client name
+        // Fallback by client name ONLY if OR has no valid FT number
+        // (to avoid false positives when FT is available)
+        if (noFT && !noFT.startsWith('SANS-FT') && !noFT.startsWith('MANUEL')) {
+          return false // OR has a FT — only match by FT, not by name
+        }
         const c = (o.client||'').toLowerCase().trim()
         return c && clientLower && (c.includes(clientLower) || clientLower.includes(c))
       })
