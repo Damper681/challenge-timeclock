@@ -181,6 +181,29 @@ async function compressImage(file, maxPx, quality) {
   })
 }
 
+// ─── EDIT NOTE FORM ──────────────────────────────────────────────────────────
+function EditNoteForm({ initial, color, onSave, onCancel }) {
+  const [text, setText] = useState(initial || '')
+  const speech = useSpeech(t => setText(prev => prev ? prev+' '+t : t))
+  return (
+    <div style={{display:'flex', flexDirection:'column', gap:12}}>
+      <textarea style={{width:'100%', background:'#0d0d0d', border:'1px solid #2a2a2a', borderRadius:10, color:'#f0f0f0', fontSize:16, padding:'12px 14px', resize:'none', outline:'none', fontFamily:'var(--font-body)', lineHeight:1.6}}
+        value={text} onChange={e=>setText(e.target.value)} rows={4} autoFocus/>
+      <button style={{padding:'12px', borderRadius:10, border:'1px solid', fontSize:15, fontWeight:600, cursor:'pointer', transition:'all 0.15s', textAlign:'center',
+        background: speech.listening ? color+'30':'rgba(255,255,255,0.07)',
+        borderColor: speech.listening ? color:'rgba(255,255,255,0.12)',
+        color: speech.listening ? color:'#ccc'
+      }} onClick={speech.listening ? speech.stop : speech.start}>
+        {speech.listening ? '⏹ Arrêter' : '🎤 Dicter'}
+      </button>
+      <div style={{display:'flex', gap:8}}>
+        <button style={{flex:1, padding:'13px', background:'transparent', border:'1px solid #2a2a2a', borderRadius:10, color:'#666', fontSize:14, fontWeight:600, cursor:'pointer'}} onClick={onCancel}>Annuler</button>
+        <button style={{flex:2, padding:'13px', borderRadius:10, fontSize:15, fontWeight:700, cursor:'pointer', background:color, color:'#000'}} onClick={()=>onSave(text)}>Enregistrer</button>
+      </div>
+    </div>
+  )
+}
+
 // ─── OR CARD (shared) ─────────────────────────────────────────────────────────
 function ORCard({ or, user, activeOR, elapsed, orTotals, onSelect }) {
   const color = USER_COLORS[user.id] || '#e8c547'
@@ -236,6 +259,7 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
   const [km, setKm] = useState(or.km || '')
   const [kmSaved, setKmSaved] = useState(!!or.km)
   const [modal, setModal] = useState(null)
+  const [editingNote, setEditingNote] = useState(null)
 
   useEffect(()=>{
     const q = query(collection(db,'pointages'), where('orId','==',or.id))
@@ -307,6 +331,11 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
 
   const totalMin = orPointages.filter(p=>p.end!==null&&!p.isStandaloneNote).reduce((s,p)=>s+(p.duration_min||0),0)
   const totalDisplay = fmtMin(totalMin+(isMine?Math.floor(elapsed/60):0))
+
+  const updateNote = async (pointageId, text) => {
+    await updateDoc(doc(db,'pointages',pointageId), { note: text })
+    setEditingNote(null)
+  }
 
   const addNote = async (text) => {
     if (!text.trim()) return
@@ -463,7 +492,12 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
                       : `${fmtDate(p.start)} ${fmtTime(p.start)}${p.end?` → ${fmtTime(p.end)}`:' → en cours'}`}
                   </span>
                 </div>
-                {p.note && <div style={s.histNote}>{p.note}</div>}
+                {p.note && (
+                  <div style={{display:'flex', alignItems:'flex-start', gap:8}}>
+                    <div style={s.histNote}>{p.note}</div>
+                    <button style={s.editNoteBtn} onClick={()=>setEditingNote({id:p.id, text:p.note})} title="Modifier">✏️</button>
+                  </div>
+                )}
               </div>
               <div style={{...s.histDur, color:p.end===null?(USER_COLORS[p.mechanic]||color):'#aaa'}}>
                 {p.isStandaloneNote?'📝':p.end===null?'⏱':fmtMin(p.duration_min)}
@@ -473,6 +507,19 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
         </div>
       )}
 
+      {editingNote && (
+        <div style={s.overlay}>
+          <div style={s.noteBox}>
+            <p style={s.noteTitle}>Modifier la note</p>
+            <EditNoteForm
+              initial={editingNote.text}
+              color={color}
+              onSave={text=>updateNote(editingNote.id, text)}
+              onCancel={()=>setEditingNote(null)}
+            />
+          </div>
+        </div>
+      )}
       {modal==='stop' && <NoteOverlay color={color} title="Rapport de fin" subtitle={`OR ${or.noFT} · ${or.client}`} onConfirm={note=>{onStop(note);setModal(null)}}/>}
       {modal==='note' && <NoteOverlay color={color} title="Ajouter une note" subtitle={`OR ${or.noFT} · ${or.client}`} onConfirm={async text=>{await addNote(text);setModal(null)}}/>}
       {modal==='photo' && <PhotoUploader or={or} color={color} onClose={()=>setModal(null)}/>}
@@ -491,6 +538,7 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
   const [selectedOR, setSelectedOR] = useState(null)
   const [tab, setTab] = useState('today') // 'today' | 'waiting'
   const [modal, setModal] = useState(null)
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const timerRef = useRef(null)
   const color = USER_COLORS[user.id] || '#e8c547'
@@ -574,6 +622,13 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
   }
 
   const allOrs = tab==='today' ? todayOrs : waitingOrs
+  const filteredOrs = search.trim() ? allOrs.filter(o=>{
+    const q = search.toLowerCase()
+    return (o.client||'').toLowerCase().includes(q) ||
+           (o.vehicule||'').toLowerCase().includes(q) ||
+           (o.plaques||'').toLowerCase().includes(q) ||
+           String(o.noFT||'').toLowerCase().includes(q)
+  }) : allOrs
   const activeOrData = [...todayOrs,...waitingOrs].find(o=>o.id===activeOR?.orId)
 
   return (
@@ -612,14 +667,23 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
             </button>
           </div>
 
+          <div style={s.searchWrap}>
+            <input style={s.searchInput}
+              placeholder="🔍  Client, véhicule, N° FT..."
+              value={search}
+              onChange={e=>{setSearch(e.target.value)}}
+            />
+            {search && <button style={s.searchClear} onClick={()=>setSearch('')}>✕</button>}
+          </div>
           <div style={s.list}>
             {loading && <div style={s.empty}>Chargement...</div>}
-            {!loading && allOrs.length===0 && (
+            {!loading && filteredOrs.length===0 && search && <div style={s.empty}>Aucun résultat pour "{search}"</div>}
+            {!loading && filteredOrs.length===0 && (
               <div style={s.empty}>
-                {tab==='today' ? 'Aucun OR pour aujourd\'hui' : 'Aucun dossier en attente'}
+                {search ? `Aucun résultat pour "${search}"` : tab==='today' ? "Aucun OR pour aujourd'hui" : 'Aucun dossier en attente'}
               </div>
             )}
-            {!loading && allOrs.map(or=>(
+            {!loading && filteredOrs.map(or=>(
               <ORCard key={or.id} or={or} user={user} activeOR={activeOR} elapsed={elapsed} orTotals={orTotals} onSelect={setSelectedOR}/>
             ))}
           </div>
@@ -677,6 +741,9 @@ const s = {
   bottomRow: { padding:'8px 12px 0', display:'flex', gap:8 },
   createOrBtn: { flex:1, padding:'14px', background:'transparent', border:'1px solid #2a2a2a', borderRadius:12, color:'#888', fontSize:14, fontWeight:600, cursor:'pointer' },
   internalBtn: { width:'100%', padding:'14px', background:'transparent', border:'1px dashed #222', borderRadius:12, color:'#555', fontSize:14, cursor:'pointer' },
+  searchWrap: { position:'relative', padding:'8px 12px 4px', display:'flex', alignItems:'center', gap:8 },
+  searchInput: { flex:1, background:'#111', border:'1px solid #2a2a2a', borderRadius:10, color:'#f0f0f0', fontSize:15, padding:'11px 14px', outline:'none', fontFamily:'var(--font-body)' },
+  searchClear: { background:'transparent', border:'none', color:'#555', fontSize:18, cursor:'pointer', padding:'4px 8px', flexShrink:0 },
   card: { display:'flex', borderRadius:14, border:'1px solid', textAlign:'left', transition:'all 0.12s', cursor:'pointer', overflow:'hidden', position:'relative' },
   cardActiveLine: { width:4, flexShrink:0 },
   cardInner: { flex:1, padding:'15px 16px', display:'flex', flexDirection:'column', gap:5 },
@@ -780,4 +847,5 @@ const s = {
   cmdPartDesc: { fontSize:13, color:'#bbb', lineHeight:1.4, flex:1 },
   cmdPartQty: { fontSize:12, color:'#666', fontFamily:'var(--font-mono)', flexShrink:0 },
   cmdNotes: { fontSize:12, color:'#555', fontStyle:'italic', lineHeight:1.4 },
+  editNoteBtn: { background:'transparent', border:'none', cursor:'pointer', fontSize:14, padding:'2px 4px', flexShrink:0, opacity:0.6 },
 }
