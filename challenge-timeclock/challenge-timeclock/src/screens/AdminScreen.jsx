@@ -18,8 +18,8 @@ function parseArianDate(raw) {
   return `${new Date().getFullYear()}-${match[2].padStart(2,'0')}-${match[1].padStart(2,'0')}`
 }
 
-function parseORs(data) {
-  const todayStr = today()
+function parseORs(data, targetDate) {
+  const todayStr = targetDate || today()
   const ors = []
   let headerRow = -1
   for (let i=0; i<data.length; i++) {
@@ -125,11 +125,22 @@ const mf = {
 
 export default function AdminScreen({ onDashboard, onLogout }) {
   const [step, setStep] = useState('idle')
+  const [space, setSpace] = useState('challenge') // 'challenge' | 'gt'
   const [ors, setOrs] = useState([])
   const [diff, setDiff] = useState(null) // { added, updated, removed }
   const [error, setError] = useState('')
   const [pushed, setPushed] = useState(0)
   const [total, setTotal] = useState(0)
+
+  const [importDate, setImportDate] = useState('today') // 'today' | 'tomorrow'
+
+  const getImportDate = () => {
+    if (importDate === 'tomorrow') {
+      const d = new Date(); d.setDate(d.getDate()+1)
+      return d.toISOString().split('T')[0]
+    }
+    return today()
+  }
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0]
@@ -140,7 +151,7 @@ export default function AdminScreen({ onDashboard, onLogout }) {
       const wb = XLSX.read(buf, {type:'array'})
       const ws = wb.Sheets[wb.SheetNames[0]]
       const data = XLSX.utils.sheet_to_json(ws, {header:1, defval:''})
-      const parsed = parseORs(data)
+      const parsed = parseORs(data, getImportDate())
 
       // Load existing ORs for today
       const snap = await getDocs(query(collection(db,'ors'), where('dateKey','==',today())))
@@ -215,7 +226,7 @@ export default function AdminScreen({ onDashboard, onLogout }) {
   return (
     <div style={s.root}>
       <div style={s.header}>
-        <div style={s.saraAvatar}>S</div>
+        <div style={s.adminAvatar}>A</div>
         <div style={s.hCenter}>
           <span style={s.hName}>Sara</span>
           <span style={s.hSub}>Administration</span>
@@ -367,7 +378,7 @@ export default function AdminScreen({ onDashboard, onLogout }) {
 const s = {
   root: { minHeight:'100dvh', background:'#0d0d0d', display:'flex', flexDirection:'column' },
   header: { display:'flex', alignItems:'center', gap:10, padding:'16px 16px 14px', borderBottom:'1px solid #1e1e1e' },
-  saraAvatar: { width:40, height:40, borderRadius:'50%', background:'rgba(232,197,71,0.15)', color:'#e8c547', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:17 },
+  adminAvatar: { width:40, height:40, borderRadius:'50%', background:'rgba(232,197,71,0.15)', color:'#e8c547', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:17 },
   hCenter: { flex:1, display:'flex', flexDirection:'column' },
   hName: { fontWeight:800, fontSize:17, color:'#e8c547' },
   hSub: { fontSize:12, color:'#555' },
@@ -379,6 +390,8 @@ const s = {
   uploadHint: { fontSize:13, color:'#555' },
   uploadBtn: { marginTop:16, padding:'14px 32px', background:'#e8c547', color:'#000', borderRadius:12, fontWeight:800, fontSize:15, cursor:'pointer', display:'inline-block' },
   dateStr: { marginTop:20, fontSize:11, color:'#2a2a2a', textTransform:'capitalize', fontFamily:'var(--font-mono)' },
+  dateTabs: { display:'flex', gap:8 },
+  dateTab: { padding:'8px 20px', borderRadius:20, fontSize:14, fontWeight:600, cursor:'pointer' },
   divider: { display:'flex', alignItems:'center', width:'100%', maxWidth:280, gap:10 },
   dividerText: { fontSize:12, color:'#333', flexShrink:0 },
   manualBtn: { padding:'13px 24px', background:'transparent', border:'1px solid #2a2a2a', borderRadius:12, color:'#888', fontSize:14, fontWeight:600, cursor:'pointer' },
