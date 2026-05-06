@@ -3,8 +3,7 @@ import {
   collection, onSnapshot, doc, addDoc, updateDoc,
   query, where, serverTimestamp, getDocs, orderBy
 } from 'firebase/firestore'
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
-import { db, storage } from '../firebase.js'
+import { db } from '../firebase.js'
 import { dbCommandes } from '../firebaseCommandes.js'
 
 const USER_COLORS = { jose:'#4fc3f7', vivian:'#6ee7a0', valentin:'#ffb74d' }
@@ -113,6 +112,9 @@ function PhotoUploader({ or, color, onClose }) {
   const [error, setError] = useState('')
   const inputRef = useRef(null)
 
+  const CLOUDINARY_CLOUD = 'dpej0wnet'
+  const CLOUDINARY_PRESET = 'challenge_atelier'
+
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files)
     if (!files.length) return
@@ -121,11 +123,17 @@ function PhotoUploader({ or, color, onClose }) {
       const results = []
       for (const file of files) {
         const compressed = await compressImage(file, 1600, 0.82)
-        const filename = `${today()}/${or.noFT}_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g,'_')}`
-        const storageRef = ref(storage, `photos/${filename}`)
-        await uploadBytes(storageRef, compressed)
-        const url = await getDownloadURL(storageRef)
-        results.push({ url, filename, name: file.name })
+        const formData = new FormData()
+        formData.append('file', compressed)
+        formData.append('upload_preset', CLOUDINARY_PRESET)
+        formData.append('folder', `challenge-atelier/${today()}`)
+        const res = await fetch(
+          `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+          { method: 'POST', body: formData }
+        )
+        if (!res.ok) throw new Error('Upload échoué')
+        const data = await res.json()
+        results.push({ url: data.secure_url, publicId: data.public_id, name: file.name })
       }
       await addDoc(collection(db,'photos'), {
         orId: or.id, noFT: or.noFT, client: or.client,
@@ -182,6 +190,78 @@ async function compressImage(file, maxPx, quality) {
 }
 
 // ─── EDIT NOTE FORM ──────────────────────────────────────────────────────────
+const CARROSSERIE_KW_M = ['carrosserie','sinistre','peinture','pare-choc','aile','capot','portière','vitre','pare-brise','tôle','tole']
+
+async function createManualOR(fields, user) {
+  const travaux = fields.travaux || ''
+  await addDoc(collection(db,'ors'), {
+    noFT: fields.noFT || `MANUEL-${Date.now()}`,
+    client: fields.client || '(sans client)',
+    vehicule: fields.vehicule || '',
+    plaques: fields.plaques || '',
+    travaux: travaux.slice(0,300),
+    mécano: fields.mécano || '',
+    dateKey: today(),
+    arrivee: today(), depart: '',
+    isCarrosserie: CARROSSERIE_KW_M.some(k=>travaux.toLowerCase().includes(k)),
+    sansFT: !fields.noFT,
+    status: fields.waiting ? 'waiting' : 'active',
+    waitingMotif: fields.waiting ? fields.waitingMotif : '',
+    waitingSince: fields.waiting ? new Date().toISOString() : null,
+    retired: false, activeMechanics: [],
+    importedAt: new Date().toISOString(), isManual: true,
+    createdBy: user?.name || '',
+  })
+}
+
+function CreateORForm({ color, user, onSave, onCancel }) {
+  const [f, setF] = useState({ noFT:'', client:'', vehicule:'', plaques:'', travaux:'', mécano:'', waiting:false, waitingMotif:'' })
+  const set = (k,v) => setF(p=>({...p,[k]:v}))
+  const MOTIFS_W = ['En attente de pièces','Expertise en cours','Client injoignable','Accord assurance attendu','Restauration','Autre']
+  const fields = [
+    {key:'noFT',label:'N° FT (optionnel)',placeholder:'Ex : 19583'},
+    {key:'client',label:'Client *',placeholder:'Nom du client'},
+    {key:'vehicule',label:'Véhicule',placeholder:'Ex : VW Golf VII'},
+    {key:'plaques',label:'Plaques',placeholder:'Ex : FR 123456'},
+    {key:'mécano',label:'Mécanicien assigné',placeholder:'José, Vivian, Valentin...'},
+  ]
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:14,maxHeight:'70vh',overflowY:'auto'}}>
+      {fields.map(({key,label,placeholder})=>(
+        <div key={key} style={{display:'flex',flexDirection:'column',gap:6}}>
+          <label style={{fontSize:11,letterSpacing:'0.12em',color:'#555',fontFamily:'var(--font-mono)'}}>{label}</label>
+          <input style={{background:'#0d0d0d',border:'1px solid #2a2a2a',borderRadius:8,color:'#fff',fontSize:16,padding:'12px 14px',outline:'none',fontFamily:'var(--font-body)'}}
+            placeholder={placeholder} value={f[key]} onChange={e=>set(key,e.target.value)}/>
+        </div>
+      ))}
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        <label style={{fontSize:11,letterSpacing:'0.12em',color:'#555',fontFamily:'var(--font-mono)'}}>TRAVAUX À EFFECTUER</label>
+        <textarea style={{background:'#0d0d0d',border:'1px solid #2a2a2a',borderRadius:8,color:'#fff',fontSize:15,padding:'12px 14px',outline:'none',fontFamily:'var(--font-body)',resize:'none',lineHeight:1.5}}
+          placeholder="Description des travaux..." value={f.travaux} onChange={e=>set('travaux',e.target.value)} rows={3}/>
+      </div>
+      <button style={{padding:'13px',background:f.waiting?'rgba(136,136,136,0.15)':'rgba(255,255,255,0.04)',border:`1px solid ${f.waiting?'#555':'#2a2a2a'}`,borderRadius:10,color:f.waiting?'#aaa':'#666',fontSize:14,fontWeight:600,cursor:'pointer',textAlign:'left'}}
+        onClick={()=>set('waiting',!f.waiting)}>
+        {f.waiting ? '⏸ Créer en attente ✓' : '⏸ Créer directement en attente'}
+      </button>
+      {f.waiting && (
+        <div style={{display:'flex',flexDirection:'column',gap:6}}>
+          {MOTIFS_W.map(m=>(
+            <button key={m} style={{padding:'11px 14px',borderRadius:9,border:'1px solid',background:f.waitingMotif===m?color+'20':'rgba(255,255,255,0.03)',borderColor:f.waitingMotif===m?color:'#2a2a2a',color:f.waitingMotif===m?color:'#aaa',fontSize:14,fontWeight:600,cursor:'pointer',textAlign:'left'}}
+              onClick={()=>set('waitingMotif',m)}>{m}</button>
+          ))}
+        </div>
+      )}
+      <div style={{display:'flex',gap:10,paddingTop:4}}>
+        <button style={{flex:1,padding:'14px',background:'transparent',border:'1px solid #2a2a2a',borderRadius:12,color:'#555',fontSize:14,fontWeight:600,cursor:'pointer'}} onClick={onCancel}>Annuler</button>
+        <button style={{flex:2,padding:'14px',background:color,borderRadius:12,color:'#000',fontSize:15,fontWeight:800,cursor:'pointer'}}
+          onClick={()=>{ if(!f.client.trim()){alert('Client requis');return}; onSave(f) }}>
+          Créer l'OR
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function EditNoteForm({ initial, color, onSave, onCancel }) {
   const [text, setText] = useState(initial || '')
   const speech = useSpeech(t => setText(prev => prev ? prev+' '+t : t))
