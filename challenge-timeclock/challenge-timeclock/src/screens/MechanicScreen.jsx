@@ -253,24 +253,19 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
     if (!or.client) { setCommandesLoading(false); return }
     const clientLower = or.client.toLowerCase().trim()
     const noFT = or.noFT
-    console.log('[Commandes] OR noFT:', noFT, 'client:', or.client)
     // Load all non-archived orders and filter in JS
     const q = query(collection(dbCommandes,'orders'))
     return onSnapshot(q, snap=>{
-      console.log('[Commandes] snapshot reçu, docs:', snap.docs.length)
       const all = snap.docs.map(d=>({id:d.id,...d.data()}))
-      console.log('[Commandes] sample doc:', JSON.stringify(all.find(o=>o.client==='Cattin')))
       const matched = all.filter(o=>{
         // Priority 1 : match by noFT if available on the order
         if (o.noFT && noFT && !noFT.startsWith('SANS-FT') && !noFT.startsWith('MANUEL')) {
-          console.log('[Commandes] match FT:', o.noFT, '===', noFT, '->', String(o.noFT).trim() === String(noFT).trim())
           return String(o.noFT).trim() === String(noFT).trim()
         }
         // Fallback : match by client name
         const c = (o.client||'').toLowerCase().trim()
         return c && clientLower && (c.includes(clientLower) || clientLower.includes(c))
       })
-      console.log('[Commandes] matched:', matched.length)
       // Sort by ts desc
       matched.sort((a,b)=>{ const ta=a.ts?.toDate?a.ts.toDate():new Date(0); const tb=b.ts?.toDate?b.ts.toDate():new Date(0); return tb-ta })
       setCommandes(matched)
