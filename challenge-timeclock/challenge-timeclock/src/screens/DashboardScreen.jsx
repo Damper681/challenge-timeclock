@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { collection, query, where, onSnapshot, deleteDoc, doc } from 'firebase/firestore'
-import { ref, deleteObject } from 'firebase/storage'
-import { db, storage } from '../firebase.js'
+import { db } from '../firebase.js'
 
 const TEAM = [
   { id:'jose',    name:'José',    label:'Mécanicien', color:'#4fc3f7' },
@@ -65,18 +64,14 @@ export default function DashboardScreen({ onBack, onLogout }) {
   },[sel])
 
   const deletePhoto = async (photoDoc, photoItem) => {
-    setDeletingPhoto(photoItem.filename)
+    setDeletingPhoto(photoItem.publicId || photoItem.filename || photoItem.url)
     try {
-      const storageRef = ref(storage, `photos/${photoItem.filename}`)
-      await deleteObject(storageRef)
-      // If last photo in doc, delete the doc too
-      const remaining = (photoDoc.photos||[]).filter(p=>p.filename!==photoItem.filename)
+      const remaining = (photoDoc.photos||[]).filter(p=>p.url!==photoItem.url)
       if (remaining.length===0) {
         await deleteDoc(doc(db,'photos',photoDoc.docId))
       } else {
-        await import('firebase/firestore').then(({updateDoc, doc:fDoc})=>
-          updateDoc(fDoc(db,'photos',photoDoc.docId), {photos: remaining})
-        )
+        const {updateDoc: upd, doc: fDoc} = await import('firebase/firestore')
+        await upd(fDoc(db,'photos',photoDoc.docId), {photos: remaining})
       }
     } catch(e) { console.error(e) }
     setDeletingPhoto(null)
@@ -236,9 +231,9 @@ export default function DashboardScreen({ onBack, onLogout }) {
                       <button
                         style={{...s.deleteBtn, opacity: deletingPhoto===p.filename?0.5:1}}
                         onClick={()=>deletePhoto(photoDoc, p)}
-                        disabled={deletingPhoto===p.filename}
+                        disabled={!!deletingPhoto}
                       >
-                        {deletingPhoto===p.filename ? '...' : '🗑'}
+                        {deletingPhoto ? '...' : '🗑'}
                       </button>
                     </div>
                   ))}
