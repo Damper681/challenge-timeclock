@@ -209,6 +209,7 @@ async function createManualOR(fields, user) {
     waitingMotif: fields.waiting ? fields.waitingMotif : '',
     waitingSince: fields.waiting ? new Date().toISOString() : null,
     retired: false, activeMechanics: [],
+    space: user?.space || 'challenge',
     importedAt: new Date().toISOString(), isManual: true,
     createdBy: user?.name || '',
   })
@@ -291,6 +292,7 @@ function ORCard({ or, user, activeOR, elapsed, orTotals, onSelect }) {
   const others = (or.activeMechanics||[]).filter(m=>m!==user.id)
   const totalDisplay = fmtMin((orTotals[or.id]||0)+(isMine?Math.floor(elapsed/60):0))
   const isWaiting = or.status==='waiting'
+  const isCompleted = or.status==='completed'
 
   return (
     <button style={{
@@ -321,9 +323,7 @@ function ORCard({ or, user, activeOR, elapsed, orTotals, onSelect }) {
         {isWaiting && or.waitingMotif && <div style={s.waitingTag}>⏸ {or.waitingMotif}</div>}
         {or.retired && <div style={s.retiredTag}>⚠ Retiré du planning</div>}
         {isWaiting && or.waitingSince && <div style={s.waitingSince}>Depuis le {fmtDate(or.waitingSince)}</div>}
-        <div style={{...s.openHint, color:isMine?color:isWaiting?'#666':or.retired?'#e84747':'#777'}}>
-          {isMine?'● Chrono en cours — ouvrir →':'Ouvrir le dossier →'}
-        </div>
+        {isMine && <div style={{...s.openHint, color}}>● Chrono en cours</div>}
       </div>
     </button>
   )
@@ -409,6 +409,16 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
 
   const totalMin = orPointages.filter(p=>p.end!==null&&!p.isStandaloneNote).reduce((s,p)=>s+(p.duration_min||0),0)
   const totalDisplay = fmtMin(totalMin+(isMine?Math.floor(elapsed/60):0))
+
+  const deletePhoto = async (photoDocId, photoUrl, allPhotos) => {
+    const remaining = allPhotos.filter(p=>p.url!==photoUrl)
+    if (remaining.length===0) {
+      const {deleteDoc, doc: fDoc} = await import('firebase/firestore')
+      await deleteDoc(fDoc(db,'photos',photoDocId))
+    } else {
+      await updateDoc(doc(db,'photos',photoDocId), {photos: remaining})
+    }
+  }
 
   const updateNote = async (pointageId, text) => {
     await updateDoc(doc(db,'pointages',pointageId), { note: text })
@@ -504,6 +514,16 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
           {isWaiting ? '▶ Réactiver' : '⏸ Attente'}
         </button>
       </div>
+      <div style={s.completeRow}>
+        <button style={{
+          ...s.completeBtn,
+          background: isCompleted ? 'rgba(71,232,138,0.12)' : 'rgba(255,255,255,0.04)',
+          borderColor: isCompleted ? '#47e88a' : '#2a2a2a',
+          color: isCompleted ? '#47e88a' : '#888',
+        }} onClick={()=>toggleComplete(or)}>
+          {isCompleted ? '✓ Travaux terminés' : '○ Marquer comme terminé'}
+        </button>
+      </div>
 
       {/* Photo thumbnails */}
       {orPhotos.length>0 && (
@@ -511,7 +531,10 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
           <div style={s.sectionLabel}>PHOTOS · {orPhotos.length}</div>
           <div style={s.thumbRow}>
             {orPhotos.map((p,i)=>(
-              <a key={i} href={p.url} target="_blank" rel="noreferrer"><img src={p.url} alt="" style={s.thumbSmall}/></a>
+              <div key={i} style={{position:'relative',flexShrink:0}}>
+                <a href={p.url} target="_blank" rel="noreferrer"><img src={p.url} alt="" style={s.thumbSmall}/></a>
+                <button style={s.thumbDelete} onClick={e=>{e.preventDefault();if(confirm('Supprimer cette photo ?'))deletePhoto(p.docId,p.url,orPhotos)}} title="Supprimer">🗑</button>
+              </div>
             ))}
           </div>
         </div>
@@ -610,13 +633,16 @@ function ORDetail({ or, user, activeOR, elapsed, onBack, onStart, onStop }) {
 export default function MechanicScreen({ user, onLogout, onDashboard }) {
   const [todayOrs, setTodayOrs] = useState([])
   const [waitingOrs, setWaitingOrs] = useState([])
+  const [completedOrs, setCompletedOrs] = useState([])
   const [orTotals, setOrTotals] = useState({})
   const [activeOR, setActiveOR] = useState(null)
   const [elapsed, setElapsed] = useState(0)
   const [selectedOR, setSelectedOR] = useState(null)
-  const [tab, setTab] = useState('today') // 'today' | 'waiting'
+  const [tab, setTab] = useState('today') // 'today' | 'waiting' | 'completed'
   const [modal, setModal] = useState(null)
   const [search, setSearch] = useState('')
+  const scrollPosRef = useRef(0)
+  const listContainerRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const timerRef = useRef(null)
   const color = USER_COLORS[user.id] || '#e8c547'
@@ -646,12 +672,24 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
       let data = snap.docs.map(d=>({id:d.id,...d.data()}))
       if (user.role==='carrossier') data=data.filter(o=>o.isCarrosserie)
       else data=data.filter(o=>!o.isCarrosserie)
-      // Exclude those already in today's list
-      const todayIds = new Set(todayOrs.map(o=>o.id))
-      data = data.filter(o=>!todayIds.has(o.id))
+      // Show all waiting ORs regardless of date
       setWaitingOrs(data)
     })
   },[user.role, todayOrs])
+
+  // Completed ORs (across all dates)
+  useEffect(()=>{
+    const q = query(collection(db,'ors'), where('status','==','completed'))
+    return onSnapshot(q, snap=>{
+      let data = snap.docs.map(d=>({id:d.id,...d.data()}))
+      const userSpace = user.space || 'challenge'
+      if (userSpace !== 'all') data = data.filter(o => !o.space || o.space === userSpace)
+      if (user.role==='carrossier') data=data.filter(o=>o.isCarrosserie)
+      else data=data.filter(o=>!o.isCarrosserie)
+      data.sort((a,b)=> new Date(b.completedAt||0) - new Date(a.completedAt||0))
+      setCompletedOrs(data)
+    })
+  },[user.role, user.space])
 
   // Totals (all time per OR)
   useEffect(()=>{
@@ -674,6 +712,14 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
     else { clearInterval(timerRef.current); setElapsed(0) }
     return ()=>clearInterval(timerRef.current)
   },[activeOR])
+
+  const toggleComplete = async (or) => {
+    const isCompleted = or.status === 'completed'
+    await updateDoc(doc(db,'ors',or.id), {
+      status: isCompleted ? 'active' : 'completed',
+      completedAt: isCompleted ? null : new Date().toISOString(),
+    })
+  }
 
   const startOR = async (or) => {
     if(activeOR) {
@@ -699,7 +745,7 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
     setActiveOR(null)
   }
 
-  const allOrs = tab==='today' ? todayOrs : waitingOrs
+  const allOrs = tab==='today' ? todayOrs : tab==='waiting' ? waitingOrs : completedOrs
   const filteredOrs = search.trim() ? allOrs.filter(o=>{
     const q = search.toLowerCase()
     return (o.client||'').toLowerCase().includes(q) ||
@@ -743,6 +789,10 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
               En attente
               {waitingOrs.length>0 && <span style={{...s.tabCount, background:'#333', color:'#aaa'}}>{waitingOrs.length}</span>}
             </button>
+            <button style={{...s.tab, color:tab==='completed'?'#fff':'#555', borderBottom:`2px solid ${tab==='completed'?'#47e88a':'transparent'}`}} onClick={()=>setTab('completed')}>
+              Terminés
+              {completedOrs.length>0 && <span style={{...s.tabCount, background:'rgba(71,232,138,0.15)', color:'#47e88a'}}>{completedOrs.length}</span>}
+            </button>
           </div>
 
           <div style={s.searchWrap}>
@@ -753,7 +803,7 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
             />
             {search && <button style={s.searchClear} onClick={()=>setSearch('')}>✕</button>}
           </div>
-          <div style={s.list}>
+          <div ref={listContainerRef} style={{...s.list, overflowY:'auto', maxHeight:'calc(100dvh - 200px)'}}>
             {loading && <div style={s.empty}>Chargement...</div>}
             {!loading && filteredOrs.length===0 && search && <div style={s.empty}>Aucun résultat pour "{search}"</div>}
             {!loading && filteredOrs.length===0 && (
@@ -779,7 +829,7 @@ export default function MechanicScreen({ user, onLogout, onDashboard }) {
 
       {selectedOR && (
         <ORDetail or={selectedOR} user={user} activeOR={activeOR} elapsed={elapsed}
-          onBack={()=>setSelectedOR(null)} onStart={()=>startOR(selectedOR)} onStop={stopOR}/>
+          onBack={()=>{ setSelectedOR(null); setTimeout(()=>{ if(listContainerRef.current) listContainerRef.current.scrollTop = scrollPosRef.current },50) }} onStart={()=>startOR(selectedOR)} onStop={stopOR}/>
       )}
 
       {modal==='createOR' && (
@@ -876,7 +926,8 @@ const s = {
   photoPreview: { margin:'0 14px 12px', background:'#111', border:'1px solid #1e1e1e', borderRadius:12, overflow:'hidden' },
   sectionLabel: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', padding:'10px 14px 8px', borderBottom:'1px solid #1a1a1a' },
   thumbRow: { display:'flex', gap:8, padding:'10px 14px', overflowX:'auto' },
-  thumbSmall: { width:72, height:72, objectFit:'cover', borderRadius:8, flexShrink:0, border:'1px solid #2a2a2a' },
+  thumbSmall: { width:72, height:72, objectFit:'cover', borderRadius:8, display:'block', border:'1px solid #2a2a2a' },
+  thumbDelete: { position:'absolute', top:2, right:2, background:'rgba(0,0,0,0.75)', border:'none', borderRadius:5, padding:'2px 5px', fontSize:12, cursor:'pointer', lineHeight:1 },
   history: { margin:'0 14px 16px', border:'1px solid #1e1e1e', borderRadius:14, overflow:'hidden', background:'#111' },
   historyTitle: { fontSize:10, letterSpacing:'0.18em', color:'#555', fontFamily:'var(--font-mono)', padding:'12px 16px 8px', borderBottom:'1px solid #1a1a1a' },
   histRow: { display:'flex', alignItems:'flex-start', justifyContent:'space-between', padding:'13px 16px', gap:12, borderBottom:'1px solid #161616' },
@@ -926,4 +977,6 @@ const s = {
   cmdPartQty: { fontSize:12, color:'#666', fontFamily:'var(--font-mono)', flexShrink:0 },
   cmdNotes: { fontSize:12, color:'#555', fontStyle:'italic', lineHeight:1.4 },
   editNoteBtn: { background:'transparent', border:'none', cursor:'pointer', fontSize:14, padding:'2px 4px', flexShrink:0, opacity:0.6 },
+  completeRow: { padding:'0 14px 12px' },
+  completeBtn: { width:'100%', padding:'14px', border:'1px solid', borderRadius:12, fontSize:15, fontWeight:700, cursor:'pointer' },
 }
