@@ -2,15 +2,21 @@ import { useState, useEffect } from 'react'
 import { collection, query, where, onSnapshot, deleteDoc, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../firebase.js'
 
-const TEAM = [
-  { id:'jose',     name:'José',     label:'Mécanicien · Challenge', color:'#4fc3f7' },
-  { id:'vivian',   name:'Vivian',   label:'Mécanicien · Challenge', color:'#6ee7a0' },
-  { id:'valentin', name:'Valentin', label:'Carrossier · Challenge', color:'#ffb74d' },
-  { id:'marius_c', name:'Marius',   label:'Mécanicien · Challenge', color:'#f472b6' },
-  { id:'damien_c', name:'Damien',   label:'Mécanicien · Challenge', color:'#a78bfa' },
-  { id:'marius',   name:'Marius',   label:'Mécanicien · GT',        color:'#f472b6' },
-  { id:'damien',   name:'Damien',   label:'Mécanicien · GT',        color:'#a78bfa' },
+const TEAM_CHALLENGE = [
+  { id:'jose',     name:'José',     label:'Mécanicien', color:'#4fc3f7' },
+  { id:'vivian',   name:'Vivian',   label:'Mécanicien', color:'#6ee7a0' },
+  { id:'valentin', name:'Valentin', label:'Carrossier', color:'#ffb74d' },
+  { id:'marius_c', name:'Marius',   label:'Mécanicien', color:'#f472b6' },
+  { id:'damien_c', name:'Damien',   label:'Mécanicien', color:'#a78bfa' },
 ]
+
+const TEAM_GT = [
+  { id:'marius',  name:'Marius',  label:'Mécanicien', color:'#f472b6' },
+  { id:'damien',  name:'Damien',  label:'Mécanicien', color:'#a78bfa' },
+]
+
+// Use both for dashboard (admin sees all)
+const TEAM = [...TEAM_CHALLENGE, ...TEAM_GT]
 
 function today() { return new Date().toISOString().split('T')[0] }
 function fmtMin(min) {
@@ -70,11 +76,14 @@ function ORPointages({ orId }) {
   )
 }
 
-export default function DashboardScreen({ onBack, onLogout }) {
+export default function DashboardScreen({ user, onBack, onLogout }) {
   // Note: useState already imported at top level
   const [sel, setSel] = useState(today())
   const [view, setView] = useState('equipe')
   const [selectedOR, setSelectedOR] = useState(null)
+  // Space filter: admin sees both, others see their space
+  const defaultSpace = user?.space==='gt' ? 'gt' : user?.space==='challenge' ? 'challenge' : 'all'
+  const [spaceFilter, setSpaceFilter] = useState(defaultSpace)
   const [pointages, setPointages] = useState([])
   const [photos, setPhotos] = useState([]) // all photo docs for sel date
   const [loading, setLoading] = useState(true)
