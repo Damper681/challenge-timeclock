@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import LoginScreen from './screens/LoginScreen.jsx'
 import MechanicScreen from './screens/MechanicScreen.jsx'
 import AdminScreen from './screens/AdminScreen.jsx'
@@ -17,9 +17,9 @@ export default function App() {
 
   if (!user) return <LoginScreen onLogin={login}/>
 
-  if (screen==='dashboard') return <DashboardScreen onBack={()=>setScreen('main')} onLogout={logout}/>
+  if (screen==='dashboard') return <DashboardScreen user={user} onBack={()=>setScreen('main')} onLogout={logout}/>
 
-  if (user.role==='admin') return <AdminScreen onDashboard={()=>setScreen('dashboard')} onLogout={logout}/>
+  if (user.role==='admin') return <AdminScreen user={user} onDashboard={()=>setScreen('dashboard')} onLogout={logout}/>
 
   return <MechanicScreen user={user} onLogout={logout} onDashboard={()=>setScreen('dashboard')}/>
 }
