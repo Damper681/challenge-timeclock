@@ -213,7 +213,7 @@ function ImportPanel({ space, color, label, location }) {
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
-export default function AdminScreen({ onDashboard, onLogout }) {
+export default function AdminScreen({ user, onDashboard, onLogout }) {
   return (
     <div style={s.root}>
       <div style={s.header}>
@@ -227,18 +227,12 @@ export default function AdminScreen({ onDashboard, onLogout }) {
       </div>
 
       <div style={s.body}>
-        <ImportPanel
-          space="challenge"
-          color="#4fc3f7"
-          label="CHALLENGE"
-          location="Vuisternens"
-        />
-        <ImportPanel
-          space="gt"
-          color="#a78bfa"
-          label="CHALLENGE GT"
-          location="Bulle"
-        />
+        {(user?.space==='challenge' || user?.space==='all' || !user?.space) && (
+          <ImportPanel space="challenge" color="#4fc3f7" label="CHALLENGE" location="Vuisternens"/>
+        )}
+        {(user?.space==='gt' || user?.space==='all' || !user?.space) && (
+          <ImportPanel space="gt" color="#a78bfa" label="CHALLENGE GT" location="Bulle"/>
+        )}
       </div>
     </div>
   )
