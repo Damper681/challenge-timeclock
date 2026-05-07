@@ -82,7 +82,10 @@ export default function DashboardScreen({ user, onBack, onLogout }) {
   const [view, setView] = useState('equipe')
   const [selectedOR, setSelectedOR] = useState(null)
   // Space filter: admin sees both, others see their space
-  const defaultSpace = user?.space==='gt' ? 'gt' : user?.space==='challenge' ? 'challenge' : 'all'
+  // Determine default space filter based on who is logged in
+  const defaultSpace = user?.id==='admin_g' || user?.space==='gt' ? 'gt'
+    : user?.id==='admin_c' || user?.space==='challenge' ? 'challenge'
+    : 'all'
   const [spaceFilter, setSpaceFilter] = useState(defaultSpace)
   const [pointages, setPointages] = useState([])
   const [photos, setPhotos] = useState([]) // all photo docs for sel date
